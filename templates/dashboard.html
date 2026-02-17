@@ -1,0 +1,426 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — ChatConnect{% endblock %}
+
+{% block extra_css %}
+    .dashboard { padding: 24px; }
+    .section-title {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .room-list, .contact-list { display: flex; flex-direction: column; gap: 4px; }
+    .room-item, .contact-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 14px;
+        border-radius: var(--radius);
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+    .room-item:hover, .contact-item:hover { background: var(--surface2); }
+    .room-item .room-name { font-weight: 500; }
+    .room-item .room-preview { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
+    .avatar {
+        width: 36px; height: 36px;
+        border-radius: 50%;
+        background: var(--primary);
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 0.85rem; flex-shrink: 0;
+    }
+    .avatar-sm { width: 28px; height: 28px; font-size: 0.7rem; }
+    .item-info { margin-left: 12px; flex: 1; }
+    .sidebar-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+    .sidebar-card + .sidebar-card { margin-top: 16px; }
+    .modal-overlay {
+        display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.6); z-index: 100;
+        align-items: center; justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal { width: 420px; max-height: 80vh; overflow-y: auto; }
+    .search-results { max-height: 250px; overflow-y: auto; margin-top: 12px; }
+    .member-chip {
+        display: inline-flex; align-items: center; gap: 4px;
+        background: var(--surface2); padding: 4px 10px; border-radius: 16px;
+        font-size: 0.8rem; margin: 2px;
+    }
+    .member-chip .remove { cursor: pointer; color: var(--danger); font-weight: 700; margin-left: 4px; }
+    .contact-actions { display: flex; gap: 6px; }
+{% endblock %}
+
+{% block body %}
+<nav class="navbar">
+    <span class="navbar-brand">ChatConnect</span>
+    <div class="navbar-links">
+        <a href="/dashboard/" class="active">Chat</a>
+        <a href="/calls/">Calls</a>
+        <span class="text-muted text-sm" id="current-user"></span>
+        <a href="#" id="logout-btn" style="color: var(--danger);">Logout</a>
+    </div>
+</nav>
+
+<div class="container">
+    <div class="grid-2">
+        <!-- Sidebar -->
+        <div>
+            <div class="sidebar-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
+                    <span class="section-title" style="margin:0;">Chat Rooms</span>
+                    <button class="btn btn-sm btn-primary" onclick="showCreateRoom()">+ New</button>
+                </div>
+                <div id="room-list" class="room-list">
+                    <p class="text-muted text-sm">Loading...</p>
+                </div>
+            </div>
+
+            <div class="sidebar-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
+                    <span class="section-title" style="margin:0;">Contacts</span>
+                    <button class="btn btn-sm btn-outline" onclick="showAddContact()">+ Add</button>
+                </div>
+                <div id="contact-list" class="contact-list">
+                    <p class="text-muted text-sm">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main area -->
+        <div class="card" style="display:flex; flex-direction:column; min-height: 500px;">
+            <div id="no-room" style="flex:1; display:flex; align-items:center; justify-content:center;">
+                <div class="text-center">
+                    <p style="font-size: 2rem; margin-bottom: 8px;">💬</p>
+                    <p class="text-muted">Select a contact to start a direct chat,<br>or create a group room</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Room Modal -->
+<div class="modal-overlay" id="create-room-modal">
+    <div class="card modal">
+        <h3 style="margin-bottom: 16px;">Create Group Room</h3>
+        <div id="room-alert"></div>
+        <form id="create-room-form">
+            <div class="form-group">
+                <label>Room Name</label>
+                <input type="text" id="room-name" class="form-control" placeholder="e.g. Project Team" required>
+            </div>
+            <div class="form-group">
+                <label>Add Members</label>
+                <input type="text" id="member-search" class="form-control" placeholder="Search contacts..." oninput="searchMembers()">
+                <div id="member-search-results" class="search-results"></div>
+            </div>
+            <div class="form-group">
+                <label>Selected Members</label>
+                <div id="selected-members" style="min-height:30px;">
+                    <span class="text-muted text-sm">No members added yet</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <button type="button" class="btn btn-outline" onclick="closeModals()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create Room</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Add Contact Modal -->
+<div class="modal-overlay" id="add-contact-modal">
+    <div class="card modal">
+        <h3 style="margin-bottom: 16px;">Add Contact</h3>
+        <div class="form-group">
+            <input type="text" id="search-user" class="form-control" placeholder="Search by username..." oninput="searchUsers()">
+        </div>
+        <div id="search-results" class="search-results"></div>
+        <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-outline" onclick="closeModals()">Close</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const token = localStorage.getItem('access');
+    const username = localStorage.getItem('username');
+
+    if (!token) window.location.href = '/login/';
+    document.getElementById('current-user').textContent = username;
+
+    const headers = () => ({
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+    });
+
+    // --- Token refresh helper ---
+    async function refreshToken() {
+        const refresh = localStorage.getItem('refresh');
+        if (!refresh) { logout(); return null; }
+        try {
+            const res = await fetch('/api/users/token/refresh/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                localStorage.setItem('access', data.access);
+                if (data.refresh) localStorage.setItem('refresh', data.refresh);
+                return data.access;
+            }
+        } catch {}
+        logout();
+        return null;
+    }
+
+    async function apiFetch(url, options = {}) {
+        options.headers = headers();
+        let res = await fetch(url, options);
+        if (res.status === 401) {
+            const newToken = await refreshToken();
+            if (newToken) {
+                options.headers['Authorization'] = `Bearer ${newToken}`;
+                res = await fetch(url, options);
+            }
+        }
+        return res;
+    }
+
+    function logout() {
+        localStorage.clear();
+        window.location.href = '/login/';
+    }
+    document.getElementById('logout-btn').addEventListener('click', (e) => { e.preventDefault(); logout(); });
+
+    // =========================================================================
+    // ROOMS
+    // =========================================================================
+
+    async function loadRooms() {
+        const res = await apiFetch('/api/chat/rooms/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const rooms = data.results || data;
+        const container = document.getElementById('room-list');
+
+        if (rooms.length === 0) {
+            container.innerHTML = '<p class="text-muted text-sm">No rooms yet</p>';
+            return;
+        }
+
+        container.innerHTML = rooms.map(r => {
+            const members = (r.members_detail || []).filter(m => m.username !== username);
+            const displayName = r.room_type === 'direct'
+                ? (members[0]?.username || 'Chat')
+                : (r.name || 'Group');
+            const initial = displayName[0].toUpperCase();
+            const preview = r.last_message
+                ? `${r.last_message.sender}: ${r.last_message.content.substring(0, 35)}`
+                : 'No messages yet';
+
+            return `
+                <a href="/chat/${r.id}/" class="room-item" style="text-decoration:none; color:var(--text);">
+                    <div class="avatar">${initial}</div>
+                    <div class="item-info">
+                        <div class="room-name">${displayName}</div>
+                        <div class="room-preview">${preview}</div>
+                    </div>
+                    <span class="badge badge-${r.room_type === 'group' ? 'online' : 'offline'}">${r.room_type}</span>
+                </a>
+            `;
+        }).join('');
+    }
+
+    // =========================================================================
+    // CONTACTS
+    // =========================================================================
+
+    async function loadContacts() {
+        const res = await apiFetch('/api/users/contacts/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const contacts = data.results || data;
+        const container = document.getElementById('contact-list');
+
+        if (contacts.length === 0) {
+            container.innerHTML = '<p class="text-muted text-sm">No contacts yet. Add someone!</p>';
+            return;
+        }
+
+        container.innerHTML = contacts.map(c => {
+            const u = c.contact_detail;
+            return `
+                <div class="contact-item">
+                    <div class="avatar">${u.username[0].toUpperCase()}</div>
+                    <div class="item-info">
+                        <div style="font-weight:500;">${u.username}</div>
+                    </div>
+                    <div class="contact-actions">
+                        <button class="btn btn-sm btn-primary" onclick="openDirectChat(${u.id})" title="Chat">💬</button>
+                        <span class="badge badge-${u.is_online ? 'online' : 'offline'}">${u.is_online ? 'online' : 'offline'}</span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // Open or create a direct chat with a contact
+    async function openDirectChat(userId) {
+        const res = await apiFetch('/api/chat/rooms/direct/', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: userId }),
+        });
+        if (res.ok) {
+            const room = await res.json();
+            window.location.href = `/chat/${room.id}/`;
+        }
+    }
+
+    // =========================================================================
+    // CREATE GROUP ROOM WITH MEMBER SELECTION
+    // =========================================================================
+
+    let selectedMembers = []; // [{id, username}]
+
+    function showCreateRoom() {
+        selectedMembers = [];
+        renderSelectedMembers();
+        document.getElementById('room-name').value = '';
+        document.getElementById('member-search').value = '';
+        document.getElementById('member-search-results').innerHTML = '';
+        document.getElementById('room-alert').innerHTML = '';
+        document.getElementById('create-room-modal').classList.add('active');
+    }
+
+    function renderSelectedMembers() {
+        const container = document.getElementById('selected-members');
+        if (selectedMembers.length === 0) {
+            container.innerHTML = '<span class="text-muted text-sm">No members added yet</span>';
+            return;
+        }
+        container.innerHTML = selectedMembers.map(m =>
+            `<span class="member-chip">${m.username} <span class="remove" onclick="removeMember(${m.id})">×</span></span>`
+        ).join('');
+    }
+
+    function addMember(id, uname) {
+        if (selectedMembers.find(m => m.id === id)) return;
+        selectedMembers.push({ id, username: uname });
+        renderSelectedMembers();
+    }
+
+    function removeMember(id) {
+        selectedMembers = selectedMembers.filter(m => m.id !== id);
+        renderSelectedMembers();
+    }
+
+    let memberSearchTimer;
+    function searchMembers() {
+        clearTimeout(memberSearchTimer);
+        const q = document.getElementById('member-search').value;
+        if (q.length < 2) { document.getElementById('member-search-results').innerHTML = ''; return; }
+
+        memberSearchTimer = setTimeout(async () => {
+            const res = await apiFetch(`/api/users/search/?q=${encodeURIComponent(q)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const users = data.results || data;
+            document.getElementById('member-search-results').innerHTML = users.map(u => {
+                const already = selectedMembers.find(m => m.id === u.id);
+                return `
+                    <div class="contact-item" style="padding:8px 0;">
+                        <div class="avatar avatar-sm">${u.username[0].toUpperCase()}</div>
+                        <div class="item-info"><span style="font-weight:500;">${u.username}</span></div>
+                        <button class="btn btn-sm ${already ? 'btn-outline' : 'btn-success'}"
+                            onclick="addMember(${u.id}, '${u.username}')" ${already ? 'disabled' : ''}>
+                            ${already ? 'Added' : 'Add'}
+                        </button>
+                    </div>
+                `;
+            }).join('') || '<p class="text-muted text-sm">No users found</p>';
+        }, 300);
+    }
+
+    document.getElementById('create-room-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = document.getElementById('room-name').value.trim();
+        const alertBox = document.getElementById('room-alert');
+
+        if (selectedMembers.length === 0) {
+            alertBox.innerHTML = '<div class="alert alert-error">Add at least one member</div>';
+            return;
+        }
+
+        const memberIds = selectedMembers.map(m => m.id);
+
+        const res = await apiFetch('/api/chat/rooms/', {
+            method: 'POST',
+            body: JSON.stringify({ name, room_type: 'group', members: memberIds }),
+        });
+
+        if (res.ok) {
+            const room = await res.json();
+            closeModals();
+            window.location.href = `/chat/${room.id}/`;
+        } else {
+            const data = await res.json();
+            alertBox.innerHTML = `<div class="alert alert-error">${JSON.stringify(data)}</div>`;
+        }
+    });
+
+    // =========================================================================
+    // ADD CONTACT (search users)
+    // =========================================================================
+
+    function showAddContact() { document.getElementById('add-contact-modal').classList.add('active'); }
+
+    function closeModals() {
+        document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+    }
+
+    let searchTimer;
+    function searchUsers() {
+        clearTimeout(searchTimer);
+        const q = document.getElementById('search-user').value;
+        if (q.length < 2) { document.getElementById('search-results').innerHTML = ''; return; }
+
+        searchTimer = setTimeout(async () => {
+            const res = await apiFetch(`/api/users/search/?q=${encodeURIComponent(q)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const users = data.results || data;
+            document.getElementById('search-results').innerHTML = users.map(u => `
+                <div class="contact-item">
+                    <div class="avatar">${u.username[0].toUpperCase()}</div>
+                    <div class="item-info">
+                        <div style="font-weight:500;">${u.username}</div>
+                        <div class="text-sm text-muted">${u.email}</div>
+                    </div>
+                    <button class="btn btn-sm btn-success" onclick="addContact(${u.id})">Add</button>
+                </div>
+            `).join('') || '<p class="text-muted text-sm">No users found</p>';
+        }, 300);
+    }
+
+    async function addContact(userId) {
+        const res = await apiFetch('/api/users/contacts/', {
+            method: 'POST',
+            body: JSON.stringify({ contact: userId }),
+        });
+        if (res.ok) {
+            closeModals();
+            loadContacts();
+        }
+    }
+
+    // =========================================================================
+    // INIT
+    // =========================================================================
+    loadRooms();
+    loadContacts();
+</script>
+{% endblock %}

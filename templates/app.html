@@ -1,0 +1,1640 @@
+{% extends "base.html" %}
+{% block title %}ChatConnect{% endblock %}
+
+{% block extra_css %}
+    /* ===== LAYOUT ===== */
+    .app-shell { display: flex; height: calc(100vh - 56px); overflow: hidden; }
+
+    /* ---- Sidebar ---- */
+    .sidebar {
+        width: 320px; min-width: 320px;
+        background: var(--surface);
+        border-right: 1px solid var(--border);
+        display: flex; flex-direction: column;
+        overflow: hidden;
+    }
+    .sidebar-tabs {
+        display: flex; border-bottom: 1px solid var(--border);
+    }
+    .sidebar-tab {
+        flex: 1; padding: 12px 0; text-align: center;
+        font-size: 0.82rem; font-weight: 600; cursor: pointer;
+        color: var(--text-muted); border-bottom: 2px solid transparent;
+        transition: color .15s, border-color .15s; background: none; border-top: none; border-left: none; border-right: none;
+    }
+    .sidebar-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .sidebar-tab:hover { color: var(--text); }
+
+    .sidebar-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+    .sidebar-panel.active { display: flex; }
+
+    .sidebar-header {
+        padding: 12px 16px; display: flex; justify-content: space-between; align-items: center;
+    }
+    .sidebar-header .section-title {
+        font-size: 0.75rem; font-weight: 600; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: .05em; margin: 0;
+    }
+
+    .sidebar-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+
+    /* Items */
+    .contact-item, .room-item, .history-item {
+        display: flex; align-items: center; padding: 10px 12px;
+        border-radius: var(--radius); cursor: pointer; transition: background .12s;
+        gap: 10px;
+    }
+    .contact-item:hover, .room-item:hover, .history-item:hover { background: var(--surface2); }
+    .room-item.active-room { background: var(--surface2); border-left: 3px solid var(--primary); }
+
+    .avatar {
+        width: 38px; height: 38px; border-radius: 50%;
+        background: var(--primary); display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 0.85rem; flex-shrink: 0; color: #fff;
+    }
+    .avatar-sm { width: 28px; height: 28px; font-size: 0.7rem; }
+    .item-info { flex: 1; min-width: 0; }
+    .item-info .name { font-weight: 500; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-info .preview { font-size: 0.78rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+
+    .item-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .icon-btn {
+        width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border);
+        background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
+        font-size: 0.95rem; transition: background .12s, border-color .12s;
+    }
+    .icon-btn:hover { background: var(--surface2); border-color: var(--primary); }
+    .icon-btn.chat-btn:hover { border-color: var(--primary); }
+    .icon-btn.voice-btn:hover { border-color: var(--success); }
+    .icon-btn.video-btn:hover { border-color: var(--accent); }
+
+    .online-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        position: absolute; bottom: 0; right: 0;
+        border: 2px solid var(--surface);
+    }
+    .online-dot.on { background: var(--success); }
+    .online-dot.off { background: var(--text-muted); }
+
+    /* ---- Main content ---- */
+    .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* Welcome placeholder */
+    .welcome-screen {
+        flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column;
+        color: var(--text-muted);
+    }
+    .welcome-screen .icon { font-size: 3rem; margin-bottom: 12px; }
+
+    /* Chat area */
+    .chat-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .chat-header {
+        padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+        display: flex; align-items: center; justify-content: space-between;
+    }
+    .chat-header-left { display: flex; align-items: center; gap: 12px; }
+    .chat-header-left h2 { font-size: 1.05rem; margin: 0; }
+    .chat-header-actions { display: flex; align-items: center; gap: 8px; }
+
+    .member-badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+    .member-badge {
+        display: inline-flex; align-items: center; font-size: 0.7rem;
+        background: var(--surface2); padding: 2px 8px; border-radius: 12px;
+    }
+    .member-badge .dot { width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; }
+    .member-badge .dot.on { background: var(--success); }
+    .member-badge .dot.off { background: var(--text-muted); }
+
+    .messages-area {
+        flex: 1; overflow-y: auto; padding: 16px 20px;
+        display: flex; flex-direction: column; gap: 6px;
+    }
+    .message {
+        max-width: 65%; padding: 10px 14px; border-radius: 16px;
+        font-size: 0.92rem; line-height: 1.4; word-wrap: break-word;
+    }
+    .message-sent {
+        align-self: flex-end; background: var(--primary); color: #fff;
+        border-bottom-right-radius: 4px;
+    }
+    .message-received {
+        align-self: flex-start; background: var(--surface); border: 1px solid var(--border);
+        border-bottom-left-radius: 4px;
+    }
+    .message-sender { font-size: 0.72rem; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
+    .message-time { font-size: 0.68rem; color: var(--text-muted); margin-top: 3px; text-align: right; }
+    .message-sent .message-time { color: rgba(255,255,255,0.55); }
+
+    .chat-input-area {
+        padding: 12px 20px; background: var(--surface); border-top: 1px solid var(--border);
+        display: flex; gap: 10px;
+    }
+    .chat-input-area input {
+        flex: 1; padding: 10px 16px; background: var(--bg); color: var(--text);
+        border: 1px solid var(--border); border-radius: 24px; font-size: 0.92rem; outline: none;
+    }
+    .chat-input-area input:focus { border-color: var(--primary); }
+
+    .empty-chat {
+        flex: 1; display: flex; align-items: center; justify-content: center;
+        color: var(--text-muted); font-size: 0.88rem;
+    }
+
+    /* ---- Call overlay ---- */
+    .call-overlay {
+        display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.92); z-index: 200;
+        flex-direction: column; align-items: center; justify-content: center;
+    }
+    .call-overlay.active { display: flex; }
+    .call-status { font-size: 1.1rem; color: var(--text-muted); margin-bottom: 24px; }
+    .call-peer-name { font-size: 1.5rem; font-weight: 700; margin-bottom: 8px; }
+    .call-timer { font-size: 2rem; font-weight: 300; margin-bottom: 32px; font-variant-numeric: tabular-nums; }
+    .call-actions { display: flex; gap: 16px; }
+    .call-btn {
+        width: 56px; height: 56px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.4rem; border: none; cursor: pointer; transition: transform 0.15s;
+    }
+    .call-btn:hover { transform: scale(1.1); }
+    .call-btn-end { background: var(--danger); color: #fff; }
+    .call-btn-mute { background: var(--surface); color: var(--text); border: 1px solid var(--border) !important; }
+    .call-btn-mute.active { background: var(--warning); color: #000; }
+    .video-container {
+        display: none; width: 100%; max-width: 800px;
+        position: relative; margin-bottom: 24px; border-radius: var(--radius); overflow: hidden;
+    }
+    .video-container.active { display: block; }
+    #remote-video { width: 100%; background: #000; border-radius: var(--radius); min-height: 300px; object-fit: cover; }
+    #local-video {
+        position: absolute; bottom: 12px; right: 12px; width: 160px;
+        border-radius: 8px; border: 2px solid var(--primary); object-fit: cover; z-index: 2; background: #000;
+    }
+
+    /* Incoming call banner */
+    .incoming-banner {
+        display: none; position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+        background: var(--surface); border: 2px solid var(--success); border-radius: var(--radius);
+        padding: 20px 32px; text-align: center; z-index: 150;
+        animation: pulse 2s infinite; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .incoming-banner.active { display: block; }
+    @keyframes pulse {
+        0%, 100% { border-color: var(--success); }
+        50% { border-color: var(--primary); }
+    }
+
+    /* Modals */
+    .modal-overlay {
+        display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal { width: 420px; max-height: 80vh; overflow-y: auto; }
+    .search-results { max-height: 250px; overflow-y: auto; margin-top: 12px; }
+    .member-chip {
+        display: inline-flex; align-items: center; gap: 4px;
+        background: var(--surface2); padding: 4px 10px; border-radius: 16px;
+        font-size: 0.8rem; margin: 2px;
+    }
+    .member-chip .remove { cursor: pointer; color: var(--danger); font-weight: 700; margin-left: 4px; }
+
+    /* Call history items */
+    .history-item { cursor: default; }
+    .call-icon { font-size: 1.2rem; }
+
+    /* Back button (mobile only) */
+    .back-btn {
+        display: none; background: none; border: none; color: var(--primary);
+        font-size: 1.2rem; cursor: pointer; padding: 4px 8px; margin-right: 4px;
+    }
+
+    /* ===== MOBILE RESPONSIVE ===== */
+    @media (max-width: 768px) {
+        /* Navbar compact */
+        .navbar { padding: 0 12px; height: 48px; }
+        .navbar-brand { font-size: 1.1rem; }
+
+        /* App shell: stack instead of side-by-side */
+        .app-shell { height: calc(100vh - 48px); position: relative; }
+
+        /* Sidebar: full width on mobile */
+        .sidebar {
+            width: 100%; min-width: 100%;
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 10; border-right: none;
+            transition: transform 0.25s ease;
+        }
+        .sidebar.hidden { transform: translateX(-100%); }
+
+        /* Main area: full width */
+        .main-area {
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 5;
+        }
+
+        /* Show back button on mobile */
+        .back-btn { display: flex; }
+
+        /* Chat header compact */
+        .chat-header { padding: 10px 12px; }
+        .chat-header-left h2 { font-size: 0.95rem; }
+        .chat-header-left { gap: 8px; }
+        .chat-header-actions { gap: 4px; }
+        .member-badges { display: none; }
+
+        /* Messages */
+        .messages-area { padding: 12px 10px; }
+        .message { max-width: 82%; padding: 8px 12px; font-size: 0.88rem; }
+
+        /* Chat input */
+        .chat-input-area { padding: 8px 10px; gap: 8px; }
+        .chat-input-area input { padding: 10px 14px; font-size: 0.88rem; }
+        .chat-input-area .btn { padding: 8px 14px; font-size: 0.82rem; }
+
+        /* Contact items: icon buttons slightly bigger for touch */
+        .icon-btn { width: 36px; height: 36px; font-size: 1.05rem; }
+        .contact-item, .room-item, .history-item { padding: 12px 10px; }
+
+        /* Welcome screen */
+        .welcome-screen .icon { font-size: 2.5rem; }
+        .welcome-screen p { font-size: 0.95rem !important; }
+
+        /* Modals: full width on mobile */
+        .modal { width: calc(100vw - 32px); max-width: 420px; }
+
+        /* Incoming call banner */
+        .incoming-banner { padding: 16px 20px; width: calc(100% - 24px); left: 12px; transform: none; top: 56px; }
+
+        /* Call overlay: adjust for small screens */
+        .call-peer-name { font-size: 1.2rem; }
+        .call-timer { font-size: 1.6rem; margin-bottom: 20px; }
+        .call-btn { width: 50px; height: 50px; font-size: 1.2rem; }
+        .video-container { max-width: 100%; padding: 0 8px; }
+        #remote-video { min-height: 200px; }
+        #local-video { width: 100px; bottom: 8px; right: 8px; }
+
+        /* Avatar slightly smaller */
+        .avatar { width: 34px; height: 34px; font-size: 0.8rem; }
+        #chat-avatar { width: 32px; height: 32px; font-size: 0.75rem; }
+    }
+
+    /* Extra small screens */
+    @media (max-width: 380px) {
+        .sidebar-tab { font-size: 0.75rem; padding: 10px 0; }
+        .contact-item .item-actions { gap: 2px; }
+        .icon-btn { width: 32px; height: 32px; font-size: 0.95rem; }
+        .item-info .name { font-size: 0.84rem; }
+        .incoming-banner { padding: 14px 16px; }
+    }
+
+    /* Landscape phone */
+    @media (max-width: 768px) and (orientation: landscape) {
+        .app-shell { height: calc(100vh - 48px); }
+        .call-overlay { padding: 12px; }
+        .call-peer-name { font-size: 1rem; margin-bottom: 4px; }
+        .call-timer { font-size: 1.2rem; margin-bottom: 12px; }
+        .video-container { max-width: 60%; }
+    }
+{% endblock %}
+
+{% block body %}
+<nav class="navbar">
+    <span class="navbar-brand">ChatConnect</span>
+    <div class="navbar-links">
+        <span class="text-muted text-sm" id="current-user"></span>
+        <a href="#" id="logout-btn" style="color: var(--danger);">Logout</a>
+    </div>
+</nav>
+
+<!-- Call overlay (shown during active call) -->
+<div class="call-overlay" id="call-overlay">
+    <p class="call-peer-name" id="call-peer-name"></p>
+    <p class="call-status" id="call-status">Calling...</p>
+    <p class="call-timer" id="call-timer">00:00</p>
+    <div class="video-container" id="video-container">
+        <video id="remote-video" autoplay playsinline></video>
+        <video id="local-video" autoplay playsinline muted></video>
+    </div>
+    <div class="call-actions">
+        <button class="call-btn call-btn-mute" id="btn-mute" onclick="toggleMute()" title="Mute">🎤</button>
+        <button class="call-btn call-btn-mute" id="btn-cam" onclick="toggleCamera()" title="Camera" style="display:none;">📷</button>
+        <button class="call-btn call-btn-end" onclick="hangUp()" title="End Call">📞</button>
+    </div>
+</div>
+
+<!-- Incoming call banner -->
+<div class="incoming-banner" id="incoming-call">
+    <p style="font-size:2rem; margin-bottom:8px;">📞</p>
+    <p style="font-weight:600; font-size:1.1rem;" id="caller-name">Incoming call...</p>
+    <p class="text-muted text-sm" id="call-type-display" style="margin-bottom:16px;"></p>
+    <div style="display:flex; gap:12px; justify-content:center;">
+        <button class="btn btn-success" onclick="acceptCall()">Accept</button>
+        <button class="btn btn-danger" onclick="rejectCall()">Reject</button>
+    </div>
+</div>
+
+<div class="app-shell">
+    <!-- ==================== SIDEBAR ==================== -->
+    <div class="sidebar">
+        <div class="sidebar-tabs">
+            <button class="sidebar-tab active" onclick="switchTab('contacts')">Contacts</button>
+            <button class="sidebar-tab" onclick="switchTab('chats')">Chats</button>
+            <button class="sidebar-tab" onclick="switchTab('history')">History</button>
+        </div>
+
+        <!-- CONTACTS TAB -->
+        <div class="sidebar-panel active" id="tab-contacts">
+            <div class="sidebar-header">
+                <span class="section-title">Contacts</span>
+                <button class="btn btn-sm btn-outline" onclick="showAddContact()">+ Add</button>
+            </div>
+            <div class="sidebar-list" id="contact-list">
+                <p class="text-muted text-sm" style="padding:12px;">Loading...</p>
+            </div>
+        </div>
+
+        <!-- CHATS TAB -->
+        <div class="sidebar-panel" id="tab-chats">
+            <div class="sidebar-header">
+                <span class="section-title">Chat Rooms</span>
+                <button class="btn btn-sm btn-primary" onclick="showCreateRoom()">+ Group</button>
+            </div>
+            <div class="sidebar-list" id="room-list">
+                <p class="text-muted text-sm" style="padding:12px;">Loading...</p>
+            </div>
+        </div>
+
+        <!-- CALL HISTORY TAB -->
+        <div class="sidebar-panel" id="tab-history">
+            <div class="sidebar-header">
+                <span class="section-title">Call History</span>
+            </div>
+            <div class="sidebar-list" id="call-history">
+                <p class="text-muted text-sm" style="padding:12px;">Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== MAIN AREA ==================== -->
+    <div class="main-area">
+        <!-- Welcome (no room selected) -->
+        <div class="welcome-screen" id="welcome-screen">
+            <div class="icon">💬</div>
+            <p style="font-size:1.1rem; font-weight:500; margin-bottom:6px;">Welcome to ChatConnect</p>
+            <p class="text-sm">Select a contact to chat, or start a voice/video call</p>
+        </div>
+
+        <!-- Chat view (shown when room is active) -->
+        <div class="chat-view" id="chat-view" style="display:none;">
+            <div class="chat-header">
+                <div class="chat-header-left">
+                    <button class="back-btn" onclick="mobileShowSidebar()" title="Back">←</button>
+                    <div class="avatar" id="chat-avatar">?</div>
+                    <div>
+                        <h2 id="chat-room-name">Loading...</h2>
+                        <div class="member-badges" id="member-badges"></div>
+                    </div>
+                </div>
+                <div class="chat-header-actions">
+                    <button class="icon-btn voice-btn" id="header-voice-btn" onclick="callFromChat('voice')" title="Voice call" style="display:none;">📞</button>
+                    <button class="icon-btn video-btn" id="header-video-btn" onclick="callFromChat('video')" title="Video call" style="display:none;">📹</button>
+                    <button class="btn btn-sm btn-outline" id="add-member-btn" style="display:none" onclick="showAddMember()">+ Member</button>
+                    <span id="ws-status" class="text-sm"><span class="status-dot disconnected" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--danger); margin-right:4px;"></span>...</span>
+                </div>
+            </div>
+
+            <div class="messages-area" id="messages">
+                <div class="empty-chat" id="empty-chat">No messages yet — say hi!</div>
+            </div>
+
+            <div class="chat-input-area">
+                <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
+                <button class="btn btn-primary" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Room Modal -->
+<div class="modal-overlay" id="create-room-modal">
+    <div class="card modal">
+        <h3 style="margin-bottom: 16px;">Create Group Room</h3>
+        <div id="room-alert"></div>
+        <form id="create-room-form">
+            <div class="form-group">
+                <label>Room Name</label>
+                <input type="text" id="room-name-input" class="form-control" placeholder="e.g. Project Team" required>
+            </div>
+            <div class="form-group">
+                <label>Add Members</label>
+                <input type="text" id="group-member-search" class="form-control" placeholder="Search users..." oninput="searchGroupMembers()">
+                <div id="group-member-results" class="search-results"></div>
+            </div>
+            <div class="form-group">
+                <label>Selected Members</label>
+                <div id="selected-members" style="min-height:30px;">
+                    <span class="text-muted text-sm">No members added yet</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <button type="button" class="btn btn-outline" onclick="closeModals()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create Room</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Add Contact Modal -->
+<div class="modal-overlay" id="add-contact-modal">
+    <div class="card modal">
+        <h3 style="margin-bottom: 16px;">Add Contact</h3>
+        <div class="form-group">
+            <input type="text" id="search-user-input" class="form-control" placeholder="Search by username..." oninput="searchUsers()">
+        </div>
+        <div id="search-results" class="search-results"></div>
+        <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-outline" onclick="closeModals()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Member Modal (group chat) -->
+<div class="modal-overlay" id="add-member-modal">
+    <div class="card modal">
+        <h3 style="margin-bottom: 16px;">Add Member</h3>
+        <div class="form-group">
+            <input type="text" id="room-member-search" class="form-control" placeholder="Search by username..." oninput="searchUsersForRoom()">
+        </div>
+        <div id="room-member-results" class="search-results"></div>
+        <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+            <button class="btn btn-outline" onclick="closeModals()">Close</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // =========================================================================
+    // SOUND ENGINE (Web Audio API — no external files needed)
+    // =========================================================================
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    let _audioCtx = null;
+    function getAudioCtx() {
+        if (!_audioCtx) _audioCtx = new AudioCtx();
+        if (_audioCtx.state === 'suspended') _audioCtx.resume();
+        return _audioCtx;
+    }
+
+    // Generic tone helper
+    function playTone(freq, duration, type = 'sine', volume = 0.15) {
+        const ctx = getAudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(volume, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + duration);
+    }
+
+    // --- Sound effects ---
+
+    // Message received: soft double-pop
+    function soundMessageIn() {
+        playTone(880, 0.08, 'sine', 0.12);
+        setTimeout(() => playTone(1100, 0.1, 'sine', 0.10), 90);
+    }
+
+    // Message sent: quick subtle whoosh-tick
+    function soundMessageOut() {
+        playTone(600, 0.06, 'triangle', 0.08);
+    }
+
+    // Incoming call: repeating ring pattern
+    let _ringInterval = null;
+    function soundRingStart() {
+        soundRingStop();
+        function ringOnce() {
+            playTone(440, 0.15, 'sine', 0.2);
+            setTimeout(() => playTone(520, 0.15, 'sine', 0.2), 170);
+            setTimeout(() => playTone(440, 0.15, 'sine', 0.2), 340);
+            setTimeout(() => playTone(520, 0.15, 'sine', 0.2), 510);
+        }
+        ringOnce();
+        _ringInterval = setInterval(ringOnce, 2000);
+    }
+    function soundRingStop() {
+        if (_ringInterval) { clearInterval(_ringInterval); _ringInterval = null; }
+    }
+
+    // Outgoing ringing: subtle pulse
+    let _dialInterval = null;
+    function soundDialStart() {
+        soundDialStop();
+        function dialPulse() {
+            playTone(400, 0.4, 'sine', 0.10);
+            setTimeout(() => playTone(400, 0.4, 'sine', 0.10), 600);
+        }
+        dialPulse();
+        _dialInterval = setInterval(dialPulse, 3000);
+    }
+    function soundDialStop() {
+        if (_dialInterval) { clearInterval(_dialInterval); _dialInterval = null; }
+    }
+
+    // Call connected: pleasant two-tone chime
+    function soundCallConnected() {
+        soundRingStop();
+        soundDialStop();
+        playTone(523, 0.15, 'sine', 0.18);
+        setTimeout(() => playTone(659, 0.15, 'sine', 0.18), 150);
+        setTimeout(() => playTone(784, 0.25, 'sine', 0.15), 300);
+    }
+
+    // Call ended: descending tone
+    function soundCallEnded() {
+        soundRingStop();
+        soundDialStop();
+        playTone(500, 0.12, 'sine', 0.15);
+        setTimeout(() => playTone(400, 0.12, 'sine', 0.12), 130);
+        setTimeout(() => playTone(300, 0.2, 'sine', 0.10), 260);
+    }
+
+    // Toggle click: soft click
+    function soundClick() {
+        playTone(1000, 0.03, 'square', 0.06);
+    }
+
+    // Error / reject: low buzz
+    function soundError() {
+        playTone(200, 0.12, 'sawtooth', 0.10);
+        setTimeout(() => playTone(150, 0.15, 'sawtooth', 0.08), 130);
+    }
+
+    // Tab switch: tiny tick
+    function soundTick() {
+        playTone(1200, 0.025, 'sine', 0.05);
+    }
+
+    // =========================================================================
+    // AUTH & CORE
+    // =========================================================================
+    let currentToken = localStorage.getItem('access');
+    const username = localStorage.getItem('username');
+    if (!currentToken) window.location.href = '/login/';
+    document.getElementById('current-user').textContent = username;
+
+    const headers = () => ({
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${currentToken}`,
+    });
+
+    async function refreshToken() {
+        const refresh = localStorage.getItem('refresh');
+        if (!refresh) { logout(); return null; }
+        try {
+            const res = await fetch('/api/users/token/refresh/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                currentToken = data.access;
+                localStorage.setItem('access', data.access);
+                if (data.refresh) localStorage.setItem('refresh', data.refresh);
+                return data.access;
+            }
+        } catch {}
+        logout();
+        return null;
+    }
+
+    async function apiFetch(url, options = {}) {
+        options.headers = headers();
+        let res = await fetch(url, options);
+        if (res.status === 401) {
+            const newToken = await refreshToken();
+            if (newToken) {
+                options.headers['Authorization'] = `Bearer ${newToken}`;
+                res = await fetch(url, options);
+            }
+        }
+        return res;
+    }
+
+    function logout() { localStorage.clear(); window.location.href = '/login/'; }
+    document.getElementById('logout-btn').addEventListener('click', (e) => { e.preventDefault(); logout(); });
+
+    // =========================================================================
+    // MOBILE HELPERS
+    // =========================================================================
+    function isMobile() { return window.innerWidth <= 768; }
+
+    function mobileShowSidebar() {
+        document.querySelector('.sidebar').classList.remove('hidden');
+    }
+
+    function mobileHideSidebar() {
+        if (isMobile()) {
+            document.querySelector('.sidebar').classList.add('hidden');
+        }
+    }
+
+    // =========================================================================
+    // SIDEBAR TABS
+    // =========================================================================
+    function switchTab(tab) {
+        soundTick();
+        document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.sidebar-panel').forEach(p => p.classList.remove('active'));
+        document.getElementById(`tab-${tab}`).classList.add('active');
+        // Find correct tab button
+        const tabNames = ['contacts', 'chats', 'history'];
+        document.querySelectorAll('.sidebar-tab')[tabNames.indexOf(tab)].classList.add('active');
+    }
+
+    // =========================================================================
+    // CONTACTS (with chat / voice / video buttons per contact)
+    // =========================================================================
+    let contactsCache = []; // [{id, username, is_online}]
+
+    async function loadContacts() {
+        const res = await apiFetch('/api/users/contacts/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const contacts = data.results || data;
+        const container = document.getElementById('contact-list');
+
+        contactsCache = contacts.map(c => c.contact_detail);
+
+        if (contacts.length === 0) {
+            container.innerHTML = '<p class="text-muted text-sm" style="padding:12px;">No contacts yet. Add someone!</p>';
+            return;
+        }
+
+        container.innerHTML = contacts.map(c => {
+            const u = c.contact_detail;
+            const initial = u.username[0].toUpperCase();
+            return `
+                <div class="contact-item">
+                    <div style="position:relative;">
+                        <div class="avatar">${initial}</div>
+                        <span class="online-dot ${u.is_online ? 'on' : 'off'}"></span>
+                    </div>
+                    <div class="item-info">
+                        <div class="name">${u.username}</div>
+                        <div class="preview">${u.is_online ? 'Online' : 'Offline'}</div>
+                    </div>
+                    <div class="item-actions">
+                        <button class="icon-btn chat-btn" onclick="openDirectChat(${u.id})" title="Chat">💬</button>
+                        <button class="icon-btn voice-btn" onclick="makeCall(${u.id}, '${u.username}', 'voice')" title="Voice call">📞</button>
+                        <button class="icon-btn video-btn" onclick="makeCall(${u.id}, '${u.username}', 'video')" title="Video call">📹</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // =========================================================================
+    // CHAT ROOMS (sidebar list)
+    // =========================================================================
+    async function loadRooms() {
+        const res = await apiFetch('/api/chat/rooms/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const rooms = data.results || data;
+        const container = document.getElementById('room-list');
+
+        if (rooms.length === 0) {
+            container.innerHTML = '<p class="text-muted text-sm" style="padding:12px;">No chats yet</p>';
+            return;
+        }
+
+        container.innerHTML = rooms.map(r => {
+            const members = (r.members_detail || []).filter(m => m.username !== username);
+            const displayName = r.room_type === 'direct'
+                ? (members[0]?.username || 'Chat')
+                : (r.name || 'Group');
+            const initial = displayName[0].toUpperCase();
+            const preview = r.last_message
+                ? `${r.last_message.sender}: ${r.last_message.content.substring(0, 30)}`
+                : 'No messages';
+            const isActive = r.id === activeRoomId;
+            const badge = r.room_type === 'group' ? '<span class="badge badge-online" style="font-size:0.65rem;">group</span>' : '';
+
+            return `
+                <div class="room-item ${isActive ? 'active-room' : ''}" onclick="openRoom('${r.id}')">
+                    <div class="avatar">${initial}</div>
+                    <div class="item-info">
+                        <div class="name">${displayName} ${badge}</div>
+                        <div class="preview">${preview}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // =========================================================================
+    // OPEN / SWITCH CHAT ROOM (inline, no page navigation)
+    // =========================================================================
+    let activeRoomId = null;
+    let roomData = null;
+    let chatWs = null;
+    let chatWsReconnectTimer = null;
+
+    async function openDirectChat(userId) {
+        const res = await apiFetch('/api/chat/rooms/direct/', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: userId }),
+        });
+        if (res.ok) {
+            const room = await res.json();
+            openRoom(room.id);
+        }
+    }
+
+    async function openRoom(roomId) {
+        if (activeRoomId === roomId) return;
+
+        // Disconnect previous WS
+        if (chatWs) { chatWs.onclose = null; chatWs.close(); chatWs = null; }
+        clearTimeout(chatWsReconnectTimer);
+
+        activeRoomId = roomId;
+
+        // Show chat view
+        document.getElementById('welcome-screen').style.display = 'none';
+        document.getElementById('chat-view').style.display = 'flex';
+
+        // On mobile, hide sidebar to show chat
+        mobileHideSidebar();
+
+        // Load room info
+        const res = await apiFetch(`/api/chat/rooms/${roomId}/`);
+        if (!res.ok) return;
+        roomData = await res.json();
+
+        const members = roomData.members_detail || [];
+        const otherMembers = members.filter(m => m.username !== username);
+        let displayName, chatPeerId, chatPeerName;
+
+        if (roomData.room_type === 'direct') {
+            displayName = otherMembers[0]?.username || 'Chat';
+            chatPeerId = otherMembers[0]?.id;
+            chatPeerName = otherMembers[0]?.username;
+        } else {
+            displayName = roomData.name || 'Group Chat';
+            chatPeerId = null;
+            chatPeerName = null;
+        }
+
+        document.getElementById('chat-room-name').textContent = displayName;
+        document.getElementById('chat-avatar').textContent = displayName[0].toUpperCase();
+
+        // Member badges
+        document.getElementById('member-badges').innerHTML = members.map(m =>
+            `<span class="member-badge"><span class="dot ${m.is_online ? 'on' : 'off'}"></span>${m.username}</span>`
+        ).join('');
+
+        // Show call buttons for direct chats
+        const voiceBtn = document.getElementById('header-voice-btn');
+        const videoBtn = document.getElementById('header-video-btn');
+        if (roomData.room_type === 'direct' && chatPeerId) {
+            voiceBtn.style.display = '';
+            videoBtn.style.display = '';
+            voiceBtn.onclick = () => makeCall(chatPeerId, chatPeerName, 'voice');
+            videoBtn.onclick = () => makeCall(chatPeerId, chatPeerName, 'video');
+        } else {
+            voiceBtn.style.display = 'none';
+            videoBtn.style.display = 'none';
+        }
+
+        // Show add-member button for groups
+        document.getElementById('add-member-btn').style.display =
+            roomData.room_type === 'group' ? '' : 'none';
+
+        // Load messages
+        await loadMessages();
+
+        // Connect chat WebSocket
+        connectChatWS();
+
+        // Highlight in sidebar
+        loadRooms();
+
+        // Switch to chats tab
+        switchTab('chats');
+    }
+
+    // =========================================================================
+    // MESSAGES
+    // =========================================================================
+    async function loadMessages() {
+        const container = document.getElementById('messages');
+        container.innerHTML = '<div class="empty-chat" id="empty-chat">No messages yet — say hi!</div>';
+
+        const res = await apiFetch(`/api/chat/rooms/${activeRoomId}/messages/`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const messages = data.results || data;
+
+        if (messages.length === 0) return;
+        const emptyEl = document.getElementById('empty-chat');
+        if (emptyEl) emptyEl.remove();
+        container.innerHTML = messages.map(m =>
+            renderMessage(m.sender_username, m.content, m.created_at)
+        ).join('');
+        scrollToBottom();
+    }
+
+    function renderMessage(sender, content, createdAt) {
+        const isMine = sender === username;
+        const time = new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const senderLabel = isMine ? '' : `<div class="message-sender">${escapeHtml(sender)}</div>`;
+        return `
+            <div class="message ${isMine ? 'message-sent' : 'message-received'}">
+                ${senderLabel}
+                <div>${escapeHtml(content)}</div>
+                <div class="message-time">${time}</div>
+            </div>
+        `;
+    }
+
+    function escapeHtml(text) {
+        const d = document.createElement('div');
+        d.textContent = text;
+        return d.innerHTML;
+    }
+
+    function scrollToBottom() {
+        const el = document.getElementById('messages');
+        el.scrollTop = el.scrollHeight;
+    }
+
+    // =========================================================================
+    // CHAT WEBSOCKET
+    // =========================================================================
+    function connectChatWS() {
+        clearTimeout(chatWsReconnectTimer);
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const tok = localStorage.getItem('access');
+        chatWs = new WebSocket(`${wsProto}://${location.host}/ws/chat/${activeRoomId}/?token=${tok}`);
+
+        chatWs.onopen = () => {
+            document.getElementById('ws-status').innerHTML =
+                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:4px;"></span>Online';
+        };
+
+        chatWs.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data);
+                const sender = msg.sender || msg.sender_username;
+                const emptyEl = document.getElementById('empty-chat');
+                if (emptyEl) emptyEl.remove();
+                const container = document.getElementById('messages');
+                container.insertAdjacentHTML('beforeend', renderMessage(
+                    sender,
+                    msg.content || msg.message,
+                    msg.created_at || new Date().toISOString()
+                ));
+                scrollToBottom();
+                // Sound: incoming from someone else
+                if (sender !== username) soundMessageIn();
+            } catch (err) {
+                console.error('[CHAT WS] render error:', err);
+            }
+        };
+
+        chatWs.onclose = async () => {
+            document.getElementById('ws-status').innerHTML =
+                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:4px;"></span>Offline';
+            await refreshToken();
+            chatWsReconnectTimer = setTimeout(() => {
+                if (activeRoomId) connectChatWS();
+            }, 3000);
+        };
+
+        chatWs.onerror = () => chatWs.close();
+    }
+
+    function sendMessage() {
+        const input = document.getElementById('msg-input');
+        const text = input.value.trim();
+        if (!text) return;
+        if (!chatWs || chatWs.readyState !== WebSocket.OPEN) return;
+        chatWs.send(JSON.stringify({ message: text, message_type: 'text' }));
+        soundMessageOut();
+        input.value = '';
+        input.focus();
+    }
+
+    document.getElementById('msg-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendMessage();
+    });
+
+    // =========================================================================
+    // CALL FROM CHAT HEADER
+    // =========================================================================
+    function callFromChat(callType) {
+        if (!roomData || roomData.room_type !== 'direct') return;
+        const otherMembers = (roomData.members_detail || []).filter(m => m.username !== username);
+        if (otherMembers.length === 0) return;
+        makeCall(otherMembers[0].id, otherMembers[0].username, callType);
+    }
+
+    // =========================================================================
+    // NOTIFICATION WEBSOCKET (calls signaling — always connected)
+    // =========================================================================
+    let notifWs = null;
+
+    // Call state
+    let currentIncomingCall = null;
+    let currentCallId = null;
+    let currentCallType = null;
+    let peerUserId = null;
+    let peerUsername = null;
+    let isCaller = false;
+
+    // WebRTC
+    let localStream = null;
+    let peerConnection = null;
+    let isMuted = false;
+    let isCamOff = false;
+    let pendingIceCandidates = [];
+    let signalQueue = Promise.resolve();
+
+    // Timer
+    let callStartTime = null;
+    let timerInterval = null;
+
+    const ICE_SERVERS = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+    ];
+
+    function connectNotifications() {
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const tok = localStorage.getItem('access');
+        notifWs = new WebSocket(`${wsProto}://${location.host}/ws/notifications/?token=${tok}`);
+
+        notifWs.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            console.log('[NOTIF]', data);
+
+            switch (data.event) {
+                case 'incoming_call':
+                    handleIncomingCall(data);
+                    break;
+                case 'call_accepted':
+                    signalQueue = signalQueue.then(() => handleCallAccepted(data)).catch(err => console.error('[QUEUE]', err));
+                    break;
+                case 'call_ended':
+                    handleCallEnded();
+                    break;
+                case 'webrtc_signal':
+                    signalQueue = signalQueue.then(() => handleWebRTCSignal(data)).catch(err => console.error('[QUEUE]', err));
+                    break;
+                case 'signal_ack':
+                    console.log('[SIGNAL] ack: server forwarded', data.signal_type, 'to user', data.target_user_id);
+                    break;
+            }
+        };
+
+        notifWs.onclose = () => setTimeout(connectNotifications, 3000);
+        notifWs.onerror = () => notifWs.close();
+    }
+
+    function sendSignal(targetUserId, signalType, data) {
+        if (!notifWs || notifWs.readyState !== WebSocket.OPEN) {
+            console.warn('[SIGNAL] WS not open! state:', notifWs?.readyState);
+            return;
+        }
+        console.log('[SIGNAL] sending', signalType, 'to user', targetUserId);
+        notifWs.send(JSON.stringify({
+            type: 'webrtc_signal',
+            target_user_id: targetUserId,
+            signal_type: signalType,
+            data: data,
+        }));
+    }
+
+    // =========================================================================
+    // INCOMING CALL
+    // =========================================================================
+    function handleIncomingCall(data) {
+        currentIncomingCall = data;
+        document.getElementById('caller-name').textContent = `${data.caller} is calling...`;
+        document.getElementById('call-type-display').textContent = `${data.call_type} call`;
+        document.getElementById('incoming-call').classList.add('active');
+        soundRingStart();
+    }
+
+    async function acceptCall() {
+        if (!currentIncomingCall) return;
+        soundRingStop();
+        soundClick();
+        document.getElementById('incoming-call').classList.remove('active');
+
+        const callData = currentIncomingCall;
+        currentIncomingCall = null;
+
+        const res = await apiFetch(`/api/calls/${callData.call_id}/join/`, { method: 'POST' });
+        if (!res.ok) return;
+
+        currentCallId = callData.call_id;
+        currentCallType = callData.call_type;
+        peerUserId = callData.caller_id;
+        peerUsername = callData.caller;
+        isCaller = false;
+
+        showCallOverlay(peerUsername, currentCallType);
+        await startMedia(currentCallType);
+    }
+
+    async function rejectCall() {
+        if (!currentIncomingCall) return;
+        soundRingStop();
+        soundError();
+        await apiFetch(`/api/calls/${currentIncomingCall.call_id}/end/`, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'reject' }),
+        });
+        document.getElementById('incoming-call').classList.remove('active');
+        currentIncomingCall = null;
+        loadHistory();
+    }
+
+    // =========================================================================
+    // MAKE A CALL
+    // =========================================================================
+    async function makeCall(calleeId, calleeName, callType) {
+        const res = await apiFetch('/api/calls/initiate/', {
+            method: 'POST',
+            body: JSON.stringify({ callee_id: calleeId, call_type: callType }),
+        });
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || JSON.stringify(data));
+            return;
+        }
+
+        const data = await res.json();
+        currentCallId = data.call_id;
+        currentCallType = callType;
+        peerUserId = calleeId;
+        peerUsername = calleeName;
+        isCaller = true;
+
+        showCallOverlay(calleeName, callType);
+        updateCallStatus('Ringing...');
+        soundDialStart();
+        await startMedia(callType);
+    }
+
+    async function handleCallAccepted(data) {
+        console.log('[CALL] accepted by', data.callee);
+        soundDialStop();
+        updateCallStatus('Connecting...');
+        await createPeerConnection(true);
+    }
+
+    // =========================================================================
+    // CALL UI
+    // =========================================================================
+    function showCallOverlay(peerName, callType) {
+        document.getElementById('call-peer-name').textContent = peerName;
+        document.getElementById('call-timer').textContent = '00:00';
+        document.getElementById('call-overlay').classList.add('active');
+
+        if (callType === 'video') {
+            document.getElementById('video-container').classList.add('active');
+            document.getElementById('btn-cam').style.display = '';
+        } else {
+            document.getElementById('video-container').classList.remove('active');
+            document.getElementById('btn-cam').style.display = 'none';
+        }
+    }
+
+    function hideCallOverlay() {
+        document.getElementById('call-overlay').classList.remove('active');
+        document.getElementById('video-container').classList.remove('active');
+        stopTimer();
+    }
+
+    function updateCallStatus(text) {
+        document.getElementById('call-status').textContent = text;
+    }
+
+    function startTimer() {
+        callStartTime = Date.now();
+        timerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+            const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const ss = String(elapsed % 60).padStart(2, '0');
+            document.getElementById('call-timer').textContent = `${mm}:${ss}`;
+        }, 1000);
+    }
+
+    function stopTimer() {
+        if (timerInterval) clearInterval(timerInterval);
+        timerInterval = null;
+    }
+
+    // =========================================================================
+    // WEBRTC
+    // =========================================================================
+    async function startMedia(callType) {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: callType === 'video',
+            });
+            if (callType === 'video') {
+                document.getElementById('local-video').srcObject = localStream;
+            }
+            console.log('[MEDIA] got local stream, tracks:', localStream.getTracks().map(t => t.kind).join(', '));
+        } catch (err) {
+            console.error('[MEDIA] error:', err);
+            updateCallStatus('Microphone/camera access denied');
+        }
+    }
+
+    function stopMedia() {
+        if (localStream) {
+            localStream.getTracks().forEach(t => t.stop());
+            localStream = null;
+        }
+        document.getElementById('local-video').srcObject = null;
+        document.getElementById('remote-video').srcObject = null;
+    }
+
+    // Wait for ICE gathering to complete so all candidates are in the SDP
+    function waitForIceGathering(pc, timeout = 5000) {
+        return new Promise((resolve) => {
+            if (pc.iceGatheringState === 'complete') {
+                console.log('[RTC] ICE gathering already complete');
+                resolve();
+                return;
+            }
+            let resolved = false;
+            const done = () => {
+                if (resolved) return;
+                resolved = true;
+                pc.removeEventListener('icegatheringstatechange', onState);
+                resolve();
+            };
+            const onState = () => {
+                console.log('[RTC] ICE gathering state:', pc.iceGatheringState);
+                if (pc.iceGatheringState === 'complete') done();
+            };
+            pc.addEventListener('icegatheringstatechange', onState);
+            // Also listen for null candidate (signals end of candidates)
+            const origOnIce = pc.onicecandidate;
+            pc.onicecandidate = (event) => {
+                if (!event.candidate) {
+                    console.log('[RTC] ICE gathering finished (null candidate)');
+                    done();
+                }
+            };
+            // Timeout fallback
+            setTimeout(() => {
+                if (!resolved) {
+                    console.warn('[RTC] ICE gathering timed out, proceeding with what we have');
+                    done();
+                }
+            }, timeout);
+        });
+    }
+
+    async function createPeerConnection(isOfferer) {
+        pendingIceCandidates = [];
+        peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+        console.log('[RTC] PeerConnection created, isOfferer:', isOfferer);
+
+        if (localStream) {
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+            console.log('[RTC] added', localStream.getTracks().length, 'local tracks');
+        } else {
+            console.warn('[RTC] no localStream!');
+        }
+
+        peerConnection.ontrack = (event) => {
+            console.log('[RTC] remote track received:', event.track.kind);
+            document.getElementById('remote-video').srcObject = event.streams[0];
+        };
+
+        // ICE candidates — also trickle as backup
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate && peerUserId) {
+                // Trickle candidates as backup
+                sendSignal(peerUserId, 'ice-candidate', event.candidate.toJSON());
+            }
+        };
+
+        peerConnection.oniceconnectionstatechange = () => {
+            if (!peerConnection) return;
+            const state = peerConnection.iceConnectionState;
+            console.log('[RTC] ICE connection state:', state);
+            if (state === 'connected' || state === 'completed') {
+                updateCallStatus('Connected');
+                if (!timerInterval) {
+                    startTimer();
+                    soundCallConnected();
+                }
+            } else if (state === 'disconnected') {
+                updateCallStatus('Reconnecting...');
+            } else if (state === 'failed') {
+                console.log('[RTC] ICE failed, attempting restart...');
+                updateCallStatus('Retrying...');
+                tryIceRestart();
+            }
+        };
+
+        if (isOfferer) {
+            updateCallStatus('Creating offer...');
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            console.log('[RTC] local description set, waiting for ICE gathering...');
+            updateCallStatus('Gathering network info...');
+
+            // Wait for ICE gathering so candidates are in the SDP
+            await waitForIceGathering(peerConnection);
+
+            // Send offer with embedded candidates
+            const fullOffer = peerConnection.localDescription.toJSON();
+            console.log('[RTC] sending full offer (SDP length:', fullOffer.sdp.length, ')');
+            sendSignal(peerUserId, 'offer', fullOffer);
+            updateCallStatus('Offer sent...');
+        }
+    }
+
+    async function tryIceRestart() {
+        if (!peerConnection || !isCaller) return;
+        try {
+            const offer = await peerConnection.createOffer({ iceRestart: true });
+            await peerConnection.setLocalDescription(offer);
+            await waitForIceGathering(peerConnection);
+            sendSignal(peerUserId, 'offer', peerConnection.localDescription.toJSON());
+            console.log('[RTC] ICE restart offer sent');
+            updateCallStatus('Retrying connection...');
+        } catch (err) {
+            console.error('[RTC] ICE restart failed:', err);
+            updateCallStatus('Connection failed');
+            setTimeout(() => hangUp(), 3000);
+        }
+    }
+
+    async function handleWebRTCSignal(data) {
+        console.log('[RTC] signal received:', data.signal_type, 'from user', data.from_user_id,
+                    data.signal_type !== 'ice-candidate' ? '(SDP len:' + (data.data?.sdp?.length || '?') + ')' : '');
+
+        if (data.signal_type === 'offer') {
+            // Callee receives offer
+            if (!peerConnection) {
+                await createPeerConnection(false);
+            }
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.data));
+            console.log('[RTC] remote description set (offer)');
+            updateCallStatus('Creating answer...');
+
+            // Flush any trickle ICE candidates that arrived early
+            await flushPendingCandidates();
+
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            console.log('[RTC] local description set, waiting for ICE gathering...');
+            updateCallStatus('Gathering network info...');
+
+            // Wait for ICE gathering so candidates are in the SDP
+            await waitForIceGathering(peerConnection);
+
+            const fullAnswer = peerConnection.localDescription.toJSON();
+            console.log('[RTC] sending full answer (SDP length:', fullAnswer.sdp.length, ')');
+            sendSignal(data.from_user_id, 'answer', fullAnswer);
+            updateCallStatus('Answer sent, connecting...');
+        }
+        else if (data.signal_type === 'answer') {
+            // Caller receives answer
+            if (peerConnection) {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.data));
+                console.log('[RTC] remote description set (answer)');
+                updateCallStatus('Answer received, connecting...');
+                await flushPendingCandidates();
+            }
+        }
+        else if (data.signal_type === 'ice-candidate') {
+            // Trickle ICE backup
+            if (peerConnection && peerConnection.remoteDescription) {
+                try {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.data));
+                } catch (err) {
+                    console.warn('[RTC] trickle ICE error:', err.message);
+                }
+            } else {
+                pendingIceCandidates.push(data.data);
+            }
+        }
+    }
+
+    async function flushPendingCandidates() {
+        if (pendingIceCandidates.length === 0) return;
+        console.log('[RTC] flushing', pendingIceCandidates.length, 'buffered ICE candidates');
+        for (const c of pendingIceCandidates) {
+            try { await peerConnection.addIceCandidate(new RTCIceCandidate(c)); }
+            catch (err) { console.warn('[RTC] buffered ICE error:', err.message); }
+        }
+        pendingIceCandidates = [];
+    }
+
+    // =========================================================================
+    // MUTE / CAMERA
+    // =========================================================================
+    function toggleMute() {
+        if (!localStream) return;
+        soundClick();
+        isMuted = !isMuted;
+        localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
+        const btn = document.getElementById('btn-mute');
+        btn.textContent = isMuted ? '🔇' : '🎤';
+        btn.classList.toggle('active', isMuted);
+    }
+
+    function toggleCamera() {
+        if (!localStream) return;
+        soundClick();
+        isCamOff = !isCamOff;
+        localStream.getVideoTracks().forEach(t => t.enabled = !isCamOff);
+        const btn = document.getElementById('btn-cam');
+        btn.textContent = isCamOff ? '🚫' : '📷';
+        btn.classList.toggle('active', isCamOff);
+    }
+
+    // =========================================================================
+    // HANG UP
+    // =========================================================================
+    async function hangUp() {
+        if (currentCallId) {
+            try {
+                await apiFetch(`/api/calls/${currentCallId}/end/`, {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'end' }),
+                });
+            } catch {}
+        }
+        cleanupCall();
+        loadHistory();
+    }
+
+    function handleCallEnded() {
+        soundCallEnded();
+        cleanupCall();
+        document.getElementById('incoming-call').classList.remove('active');
+        currentIncomingCall = null;
+        loadHistory();
+    }
+
+    function cleanupCall() {
+        soundRingStop();
+        soundDialStop();
+        if (peerConnection) { peerConnection.close(); peerConnection = null; }
+        pendingIceCandidates = [];
+        signalQueue = Promise.resolve();
+        stopMedia();
+        hideCallOverlay();
+        currentCallId = null;
+        peerUserId = null;
+        peerUsername = null;
+        isCaller = false;
+        isMuted = false;
+        isCamOff = false;
+        document.getElementById('btn-mute').textContent = '🎤';
+        document.getElementById('btn-mute').classList.remove('active');
+    }
+
+    // =========================================================================
+    // CALL HISTORY
+    // =========================================================================
+    async function loadHistory() {
+        const res = await apiFetch('/api/calls/history/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const calls = data.results || data;
+        const container = document.getElementById('call-history');
+
+        if (calls.length === 0) {
+            container.innerHTML = '<p class="text-muted text-sm" style="padding:12px;">No calls yet</p>';
+            return;
+        }
+
+        container.innerHTML = calls.map(c => {
+            const isOutgoing = c.caller_username === username;
+            const icon = c.call_type === 'video' ? '📹' : '📞';
+            const arrow = isOutgoing ? '↗' : '↙';
+            const other = isOutgoing ? c.callee_username : c.caller_username;
+            const time = new Date(c.started_at).toLocaleString();
+            const statusColors = {
+                ended: 'var(--success)', missed: 'var(--warning)',
+                rejected: 'var(--danger)', ongoing: 'var(--primary)',
+                ringing: 'var(--warning)', initiated: 'var(--text-muted)',
+            };
+            const dur = c.duration_seconds ? ` · ${c.duration_seconds}s` : '';
+            return `
+                <div class="history-item">
+                    <span class="call-icon">${icon}</span>
+                    <div class="item-info">
+                        <div class="name">${arrow} ${other}</div>
+                        <div class="preview">${time}${dur}</div>
+                    </div>
+                    <span class="badge" style="background:${statusColors[c.status] || 'var(--border)'}; color:#000; font-size:0.65rem;">${c.status}</span>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // =========================================================================
+    // CREATE GROUP ROOM
+    // =========================================================================
+    let selectedMembers = [];
+
+    function showCreateRoom() {
+        selectedMembers = [];
+        renderSelectedMembers();
+        document.getElementById('room-name-input').value = '';
+        document.getElementById('group-member-search').value = '';
+        document.getElementById('group-member-results').innerHTML = '';
+        document.getElementById('room-alert').innerHTML = '';
+        document.getElementById('create-room-modal').classList.add('active');
+    }
+
+    function renderSelectedMembers() {
+        const container = document.getElementById('selected-members');
+        if (selectedMembers.length === 0) {
+            container.innerHTML = '<span class="text-muted text-sm">No members added yet</span>';
+            return;
+        }
+        container.innerHTML = selectedMembers.map(m =>
+            `<span class="member-chip">${m.username} <span class="remove" onclick="removeMember(${m.id})">×</span></span>`
+        ).join('');
+    }
+
+    function addMember(id, uname) {
+        if (selectedMembers.find(m => m.id === id)) return;
+        selectedMembers.push({ id, username: uname });
+        renderSelectedMembers();
+    }
+
+    function removeMember(id) {
+        selectedMembers = selectedMembers.filter(m => m.id !== id);
+        renderSelectedMembers();
+    }
+
+    let groupSearchTimer;
+    function searchGroupMembers() {
+        clearTimeout(groupSearchTimer);
+        const q = document.getElementById('group-member-search').value;
+        if (q.length < 2) { document.getElementById('group-member-results').innerHTML = ''; return; }
+
+        groupSearchTimer = setTimeout(async () => {
+            const res = await apiFetch(`/api/users/search/?q=${encodeURIComponent(q)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const users = data.results || data;
+            document.getElementById('group-member-results').innerHTML = users.map(u => {
+                const already = selectedMembers.find(m => m.id === u.id);
+                return `
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0;">
+                        <span style="font-weight:500;">${u.username}</span>
+                        <button class="btn btn-sm ${already ? 'btn-outline' : 'btn-success'}"
+                            onclick="addMember(${u.id}, '${u.username}')" ${already ? 'disabled' : ''}>
+                            ${already ? 'Added' : 'Add'}
+                        </button>
+                    </div>
+                `;
+            }).join('') || '<p class="text-muted text-sm">No users found</p>';
+        }, 300);
+    }
+
+    document.getElementById('create-room-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = document.getElementById('room-name-input').value.trim();
+        const alertBox = document.getElementById('room-alert');
+        if (selectedMembers.length === 0) {
+            alertBox.innerHTML = '<div class="alert alert-error">Add at least one member</div>';
+            return;
+        }
+        const res = await apiFetch('/api/chat/rooms/', {
+            method: 'POST',
+            body: JSON.stringify({ name, room_type: 'group', members: selectedMembers.map(m => m.id) }),
+        });
+        if (res.ok) {
+            const room = await res.json();
+            closeModals();
+            openRoom(room.id);
+            loadRooms();
+        } else {
+            const data = await res.json();
+            alertBox.innerHTML = `<div class="alert alert-error">${JSON.stringify(data)}</div>`;
+        }
+    });
+
+    // =========================================================================
+    // ADD CONTACT
+    // =========================================================================
+    function showAddContact() { document.getElementById('add-contact-modal').classList.add('active'); }
+
+    let contactSearchTimer;
+    function searchUsers() {
+        clearTimeout(contactSearchTimer);
+        const q = document.getElementById('search-user-input').value;
+        if (q.length < 2) { document.getElementById('search-results').innerHTML = ''; return; }
+
+        contactSearchTimer = setTimeout(async () => {
+            const res = await apiFetch(`/api/users/search/?q=${encodeURIComponent(q)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const users = data.results || data;
+            document.getElementById('search-results').innerHTML = users.map(u => `
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <div class="avatar avatar-sm">${u.username[0].toUpperCase()}</div>
+                        <span style="font-weight:500;">${u.username}</span>
+                    </div>
+                    <button class="btn btn-sm btn-success" onclick="addContact(${u.id})">Add</button>
+                </div>
+            `).join('') || '<p class="text-muted text-sm">No users found</p>';
+        }, 300);
+    }
+
+    async function addContact(userId) {
+        const res = await apiFetch('/api/users/contacts/', {
+            method: 'POST',
+            body: JSON.stringify({ contact: userId }),
+        });
+        if (res.ok) { closeModals(); loadContacts(); }
+    }
+
+    // =========================================================================
+    // ADD MEMBER TO ROOM (group)
+    // =========================================================================
+    function showAddMember() { document.getElementById('add-member-modal').classList.add('active'); }
+
+    let roomMemberTimer;
+    function searchUsersForRoom() {
+        clearTimeout(roomMemberTimer);
+        const q = document.getElementById('room-member-search').value;
+        if (q.length < 2) { document.getElementById('room-member-results').innerHTML = ''; return; }
+
+        roomMemberTimer = setTimeout(async () => {
+            const res = await apiFetch(`/api/users/search/?q=${encodeURIComponent(q)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const users = data.results || data;
+            const currentMembers = (roomData?.members || []);
+            document.getElementById('room-member-results').innerHTML = users.map(u => {
+                const already = currentMembers.includes(u.id);
+                return `
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0;">
+                        <span style="font-weight:500;">${u.username}</span>
+                        <button class="btn btn-sm ${already ? 'btn-outline' : 'btn-success'}"
+                            onclick="addMemberToRoom(${u.id})" ${already ? 'disabled' : ''}>
+                            ${already ? 'Member' : 'Add'}
+                        </button>
+                    </div>
+                `;
+            }).join('') || '<p class="text-muted text-sm">No users found</p>';
+        }, 300);
+    }
+
+    async function addMemberToRoom(userId) {
+        const res = await apiFetch(`/api/chat/rooms/${activeRoomId}/add-member/`, {
+            method: 'POST',
+            body: JSON.stringify({ user_id: userId }),
+        });
+        if (res.ok) {
+            closeModals();
+            openRoom(activeRoomId);
+        }
+    }
+
+    // =========================================================================
+    // MODALS
+    // =========================================================================
+    function closeModals() {
+        document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+    }
+
+    // =========================================================================
+    // INIT
+    // =========================================================================
+    loadContacts();
+    loadRooms();
+    loadHistory();
+    connectNotifications();
+</script>
+{% endblock %}

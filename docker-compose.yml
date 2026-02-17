@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  # PostgreSQL database
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chatconnect
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Redis — channel layer + Celery broker
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  # LiveKit server (local development)
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    ports:
+      - "7880:7880"   # HTTP / WebSocket
+      - "7881:7881"   # RTC (TCP)
+      - "7882:7882/udp" # RTC (UDP)
+    environment:
+      LIVEKIT_KEYS: "your-livekit-api-key: your-livekit-api-secret"
+    command: --dev
+
+volumes:
+  pgdata:

@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Register — ChatConnect{% endblock %}
+
+{% block body %}
+<div class="auth-wrapper">
+    <div class="auth-card card">
+        <h2 class="text-center" style="margin-bottom: 8px;">Create Account</h2>
+        <p class="text-center text-muted text-sm" style="margin-bottom: 24px;">Join ChatConnect</p>
+
+        <div id="alert-box"></div>
+
+        <form id="register-form">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" class="form-control" placeholder="Choose a username" required>
+            </div>
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" class="form-control" placeholder="your@email.com" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" class="form-control" placeholder="Min 8 characters" required minlength="8">
+            </div>
+            <button type="submit" class="btn btn-primary" style="width:100%; justify-content: center;">
+                Create Account
+            </button>
+        </form>
+
+        <p class="text-center text-sm mt-20">
+            Already have an account? <a href="/login/">Sign in</a>
+        </p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.getElementById('register-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const alertBox = document.getElementById('alert-box');
+        const username = document.getElementById('username').value;
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+
+        try {
+            const res = await fetch('/api/users/register/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, email, password }),
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                alertBox.innerHTML = `<div class="alert alert-success">Account created! Redirecting...</div>`;
+                // Auto-login
+                const loginRes = await fetch('/api/users/token/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                });
+                const loginData = await loginRes.json();
+                if (loginRes.ok) {
+                    localStorage.setItem('access', loginData.access);
+                    localStorage.setItem('refresh', loginData.refresh);
+                    localStorage.setItem('username', username);
+                    setTimeout(() => window.location.href = '/dashboard/', 500);
+                }
+            } else {
+                const errors = Object.values(data).flat().join('<br>');
+                alertBox.innerHTML = `<div class="alert alert-error">${errors}</div>`;
+            }
+        } catch (err) {
+            alertBox.innerHTML = `<div class="alert alert-error">Connection error</div>`;
+        }
+    });
+</script>
+{% endblock %}

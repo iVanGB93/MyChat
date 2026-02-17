@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Login — ChatConnect{% endblock %}
+
+{% block body %}
+<div class="auth-wrapper">
+    <div class="auth-card card">
+        <h2 class="text-center" style="margin-bottom: 8px;">ChatConnect</h2>
+        <p class="text-center text-muted text-sm" style="margin-bottom: 24px;">Sign in to start chatting</p>
+
+        <div id="alert-box"></div>
+
+        <form id="login-form">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" class="form-control" placeholder="Enter username" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" class="form-control" placeholder="Enter password" required>
+            </div>
+            <button type="submit" class="btn btn-primary" style="width:100%; justify-content: center;">
+                Sign In
+            </button>
+        </form>
+
+        <p class="text-center text-sm mt-20">
+            Don't have an account? <a href="/register/">Sign up</a>
+        </p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const API = '';
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const username = document.getElementById('username').value;
+        const password = document.getElementById('password').value;
+        const alertBox = document.getElementById('alert-box');
+
+        try {
+            const res = await fetch(`${API}/api/users/token/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password }),
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                localStorage.setItem('access', data.access);
+                localStorage.setItem('refresh', data.refresh);
+                localStorage.setItem('username', username);
+                window.location.href = '/dashboard/';
+            } else {
+                alertBox.innerHTML = `<div class="alert alert-error">${data.detail || 'Invalid credentials'}</div>`;
+            }
+        } catch (err) {
+            alertBox.innerHTML = `<div class="alert alert-error">Connection error</div>`;
+        }
+    });
+
+    // Redirect if already logged in
+    if (localStorage.getItem('access')) {
+        window.location.href = '/dashboard/';
+    }
+</script>
+{% endblock %}

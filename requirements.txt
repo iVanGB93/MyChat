@@ -1,0 +1,26 @@
+# Django core
+django>=5.0,<7.0
+djangorestframework>=3.15
+djangorestframework-simplejwt>=5.3
+
+# Real-time / WebSockets
+channels>=4.0
+channels-redis>=4.2
+daphne>=4.1
+
+# Database
+psycopg2-binary>=2.9
+
+# CORS
+django-cors-headers>=4.3
+
+# LiveKit (video/audio calls)
+livekit-api>=0.6
+
+# Task queue
+celery>=5.4
+redis>=5.0
+
+# Utilities
+python-dotenv>=1.0
+Pillow>=10.0
