@@ -3,11 +3,19 @@ Root URL configuration for ChatConnect.
 """
 
 from django.contrib import admin
+from django.http import JsonResponse
 from django.urls import include, path
 
 from . import views
 
+
+def health_check(request):
+    return JsonResponse({"status": "ok"})
+
+
 urlpatterns = [
+    # Health check (for Railway / load balancers)
+    path("health/", health_check, name="health"),
     # Web interface (templates)
     path("", views.login_view, name="home"),
     path("login/", views.login_view, name="login"),
