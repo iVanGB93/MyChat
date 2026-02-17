@@ -10,9 +10,13 @@ daphne>=4.1
 
 # Database
 psycopg2-binary>=2.9
+dj-database-url>=2.1
 
 # CORS
 django-cors-headers>=4.3
+
+# Static files (production)
+whitenoise[brotli]>=6.5
 
 # LiveKit (video/audio calls)
 livekit-api>=0.6
@@ -24,3 +28,4 @@ redis>=5.0
 # Utilities
 python-dotenv>=1.0
 Pillow>=10.0
+gunicorn>=21.0
