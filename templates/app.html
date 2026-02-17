@@ -972,6 +972,7 @@
     // Timer
     let callStartTime = null;
     let timerInterval = null;
+    let ringingTimeout = null;
 
     const ICE_SERVERS = [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -1044,9 +1045,6 @@
         const callData = currentIncomingCall;
         currentIncomingCall = null;
 
-        const res = await apiFetch(`/api/calls/${callData.call_id}/join/`, { method: 'POST' });
-        if (!res.ok) return;
-
         currentCallId = callData.call_id;
         currentCallType = callData.call_type;
         peerUserId = callData.caller_id;
@@ -1054,7 +1052,24 @@
         isCaller = false;
 
         showCallOverlay(peerUsername, currentCallType);
-        await startMedia(currentCallType);
+        updateCallStatus('Requesting media access...');
+
+        // Start media FIRST so localStream is ready before offer arrives
+        const mediaOk = await startMedia(currentCallType);
+        if (!mediaOk) {
+            updateCallStatus('Camera/microphone denied');
+            setTimeout(() => cleanupCall(), 2000);
+            return;
+        }
+
+        // THEN notify the caller (who will create & send the offer)
+        const res = await apiFetch(`/api/calls/${callData.call_id}/join/`, { method: 'POST' });
+        if (!res.ok) {
+            updateCallStatus('Failed to join call');
+            setTimeout(() => cleanupCall(), 2000);
+            return;
+        }
+        updateCallStatus('Waiting for connection...');
     }
 
     async function rejectCall() {
@@ -1074,13 +1089,27 @@
     // MAKE A CALL
     // =========================================================================
     async function makeCall(calleeId, calleeName, callType) {
+        showCallOverlay(calleeName, callType);
+        updateCallStatus('Requesting media access...');
+
+        // Get media FIRST so localStream is ready before call_accepted arrives
+        const mediaOk = await startMedia(callType);
+        if (!mediaOk) {
+            updateCallStatus('Camera/microphone denied');
+            setTimeout(() => cleanupCall(), 2000);
+            return;
+        }
+
+        // THEN initiate the call via API
         const res = await apiFetch('/api/calls/initiate/', {
             method: 'POST',
             body: JSON.stringify({ callee_id: calleeId, call_type: callType }),
         });
         if (!res.ok) {
-            const data = await res.json();
-            alert(data.error || JSON.stringify(data));
+            const errData = await res.json().catch(() => ({}));
+            updateCallStatus('Failed to initiate call');
+            alert(errData.error || 'Failed to initiate call');
+            cleanupCall();
             return;
         }
 
@@ -1091,14 +1120,22 @@
         peerUsername = calleeName;
         isCaller = true;
 
-        showCallOverlay(calleeName, callType);
         updateCallStatus('Ringing...');
         soundDialStart();
-        await startMedia(callType);
+
+        // Auto-hangup after 30 seconds if no answer
+        ringingTimeout = setTimeout(() => {
+            if (currentCallId && isCaller && !peerConnection) {
+                updateCallStatus('No answer');
+                soundDialStop();
+                setTimeout(() => hangUp(), 1500);
+            }
+        }, 30000);
     }
 
     async function handleCallAccepted(data) {
         console.log('[CALL] accepted by', data.callee);
+        clearTimeout(ringingTimeout);
         soundDialStop();
         updateCallStatus('Connecting...');
         await createPeerConnection(true);
@@ -1159,9 +1196,11 @@
                 document.getElementById('local-video').srcObject = localStream;
             }
             console.log('[MEDIA] got local stream, tracks:', localStream.getTracks().map(t => t.kind).join(', '));
+            return true;
         } catch (err) {
             console.error('[MEDIA] error:', err);
             updateCallStatus('Microphone/camera access denied');
+            return false;
         }
     }
 
@@ -1187,21 +1226,22 @@
                 if (resolved) return;
                 resolved = true;
                 pc.removeEventListener('icegatheringstatechange', onState);
+                pc.removeEventListener('icecandidate', onNullCandidate);
                 resolve();
             };
             const onState = () => {
                 console.log('[RTC] ICE gathering state:', pc.iceGatheringState);
                 if (pc.iceGatheringState === 'complete') done();
             };
-            pc.addEventListener('icegatheringstatechange', onState);
-            // Also listen for null candidate (signals end of candidates)
-            const origOnIce = pc.onicecandidate;
-            pc.onicecandidate = (event) => {
+            // Use addEventListener so we don't clobber the trickle handler on onicecandidate
+            const onNullCandidate = (event) => {
                 if (!event.candidate) {
                     console.log('[RTC] ICE gathering finished (null candidate)');
                     done();
                 }
             };
+            pc.addEventListener('icegatheringstatechange', onState);
+            pc.addEventListener('icecandidate', onNullCandidate);
             // Timeout fallback
             setTimeout(() => {
                 if (!resolved) {
@@ -1402,6 +1442,7 @@
     function cleanupCall() {
         soundRingStop();
         soundDialStop();
+        clearTimeout(ringingTimeout);
         if (peerConnection) { peerConnection.close(); peerConnection = null; }
         pendingIceCandidates = [];
         signalQueue = Promise.resolve();
