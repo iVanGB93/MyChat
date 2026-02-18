@@ -181,6 +181,26 @@ class EndCallView(APIView):
         return Response({"status": call.status})
 
 
+class CallStatusView(APIView):
+    """Return the current status of a call (for polling fallback)."""
+
+    def get(self, request, call_id):
+        from django.db.models import Q
+
+        try:
+            call = CallLog.objects.get(
+                Q(caller=request.user) | Q(callee=request.user),
+                id=call_id,
+            )
+        except CallLog.DoesNotExist:
+            return Response(
+                {"error": "Call not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response({"status": call.status, "call_id": str(call.id)})
+
+
 class CallHistoryView(generics.ListAPIView):
     """List call history for the authenticated user."""
 
