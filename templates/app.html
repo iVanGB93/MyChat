@@ -184,6 +184,31 @@
         50% { border-color: var(--primary); }
     }
 
+    /* Message notification toast */
+    .msg-toast {
+        position: fixed; top: -100px; right: 20px; z-index: 250;
+        background: var(--surface); border: 1px solid var(--border);
+        border-left: 4px solid var(--primary); border-radius: var(--radius);
+        padding: 12px 16px; min-width: 280px; max-width: 380px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        cursor: pointer; transition: top 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .msg-toast.show { top: 68px; }
+    .msg-toast-header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .msg-toast-avatar {
+        width: 32px; height: 32px; border-radius: 50%; background: var(--primary);
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 0.8rem; flex-shrink: 0; color: #fff;
+    }
+    .msg-toast-sender { font-weight: 600; font-size: 0.9rem; flex: 1; }
+    .msg-toast-close {
+        background: none; border: none; color: var(--text-muted); font-size: 1rem;
+        cursor: pointer; padding: 2px 6px; line-height: 1;
+    }
+    .msg-toast-close:hover { color: var(--text); }
+    .msg-toast-body { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 42px; }
+    .msg-toast-room { font-size: 0.72rem; color: var(--text-muted); margin-left: 42px; margin-top: 2px; }
+
     /* Modals */
     .modal-overlay {
         display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -266,6 +291,10 @@
         /* Incoming call banner */
         .incoming-banner { padding: 16px 20px; width: calc(100% - 24px); left: 12px; transform: none; top: 56px; }
 
+        /* Message toast mobile */
+        .msg-toast { right: 8px; left: 8px; min-width: 0; max-width: none; }
+        .msg-toast.show { top: 56px; }
+
         /* Call overlay: adjust for small screens */
         .call-peer-name { font-size: 1.2rem; }
         .call-timer { font-size: 1.6rem; margin-bottom: 20px; }
@@ -332,6 +361,17 @@
         <button class="btn btn-success" onclick="acceptCall()">Accept</button>
         <button class="btn btn-danger" onclick="rejectCall()">Reject</button>
     </div>
+</div>
+
+<!-- Message notification toast -->
+<div class="msg-toast" id="msg-toast" onclick="handleToastClick()">
+    <div class="msg-toast-header">
+        <div class="msg-toast-avatar" id="toast-avatar">?</div>
+        <span class="msg-toast-sender" id="toast-sender">User</span>
+        <button class="msg-toast-close" onclick="dismissToast(event)" title="Dismiss">✕</button>
+    </div>
+    <div class="msg-toast-body" id="toast-body">Message text...</div>
+    <div class="msg-toast-room" id="toast-room"></div>
 </div>
 
 <div class="app-shell">
@@ -1004,6 +1044,9 @@
                 case 'signal_ack':
                     console.log('[SIGNAL] ack: server forwarded', data.signal_type, 'to user', data.target_user_id);
                     break;
+                case 'new_message':
+                    handleNewMessageNotification(data);
+                    break;
             }
         };
 
@@ -1668,6 +1711,60 @@
     // =========================================================================
     function closeModals() {
         document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+    }
+
+    // =========================================================================
+    // MESSAGE NOTIFICATION TOAST
+    // =========================================================================
+    let toastDismissTimer = null;
+    let toastRoomId = null;
+
+    function handleNewMessageNotification(data) {
+        // Don't show toast if we're viewing that room
+        if (activeRoomId === data.room_id) return;
+
+        // Play notification sound
+        soundMessageIn();
+
+        // Update room list to reflect new messages
+        loadRooms();
+
+        // Show toast
+        const sender = data.sender || 'Unknown';
+        const content = data.content || '';
+        const roomName = data.room_name || sender;
+        toastRoomId = data.room_id;
+
+        document.getElementById('toast-avatar').textContent = sender.charAt(0).toUpperCase();
+        document.getElementById('toast-sender').textContent = sender;
+        document.getElementById('toast-body').textContent = content;
+        document.getElementById('toast-room').textContent = roomName !== sender ? `in ${roomName}` : '';
+
+        const toast = document.getElementById('msg-toast');
+        toast.classList.add('show');
+
+        // Auto-dismiss after 5 seconds
+        clearTimeout(toastDismissTimer);
+        toastDismissTimer = setTimeout(() => {
+            toast.classList.remove('show');
+            toastRoomId = null;
+        }, 5000);
+    }
+
+    function dismissToast(e) {
+        e.stopPropagation();
+        clearTimeout(toastDismissTimer);
+        document.getElementById('msg-toast').classList.remove('show');
+        toastRoomId = null;
+    }
+
+    function handleToastClick() {
+        clearTimeout(toastDismissTimer);
+        document.getElementById('msg-toast').classList.remove('show');
+        if (toastRoomId) {
+            openRoom(toastRoomId);
+            toastRoomId = null;
+        }
     }
 
     // =========================================================================

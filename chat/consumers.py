@@ -62,21 +62,46 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # Persist message to database
         message = await self.save_message(message_content, message_type)
 
-        # Broadcast to room group
+        msg_data = {
+            "id": str(message.id),
+            "sender": self.user.username,
+            "sender_id": self.user.id,
+            "content": message_content,
+            "message_type": message_type,
+            "created_at": message.created_at.isoformat(),
+        }
+
+        # Broadcast to room group (for users with the chat open)
         await self.channel_layer.group_send(
             self.room_group_name,
             {
                 "type": "chat_message",
-                "message": {
-                    "id": str(message.id),
-                    "sender": self.user.username,
-                    "sender_id": self.user.id,
-                    "content": message_content,
-                    "message_type": message_type,
-                    "created_at": message.created_at.isoformat(),
-                },
+                "message": msg_data,
             },
         )
+
+        # Also notify each room member via their personal notification channel
+        # so users NOT viewing this room still see a toast / badge
+        room_info = await self.get_room_info()
+        for member_id in room_info["member_ids"]:
+            if member_id == self.user.id:
+                continue
+            await self.channel_layer.group_send(
+                f"notifications_{member_id}",
+                {
+                    "type": "notify",
+                    "payload": {
+                        "event": "new_message",
+                        "room_id": str(self.room_id),
+                        "room_name": room_info["name"],
+                        "sender": self.user.username,
+                        "sender_id": self.user.id,
+                        "content": message_content[:120],
+                        "message_id": str(message.id),
+                        "created_at": message.created_at.isoformat(),
+                    },
+                },
+            )
 
     async def chat_message(self, event):
         """Send message to WebSocket client."""
@@ -98,6 +123,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             content=content,
             message_type=message_type,
         )
+
+    @database_sync_to_async
+    def get_room_info(self) -> dict:
+        """Return room name and member IDs for notification dispatch."""
+        room = ChatRoom.objects.get(id=self.room_id)
+        member_ids = list(room.members.values_list("id", flat=True))
+        return {"name": room.name or str(room.id), "member_ids": member_ids}
 
     @database_sync_to_async
     def set_user_online(self, online: bool):
