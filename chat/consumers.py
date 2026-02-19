@@ -63,7 +63,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # ---- Mark messages as read ----
         if msg_type == "mark_read":
             message_ids = data.get("message_ids", [])
-            updated_ids = await self.mark_messages_read(message_ids)
+            result = await self.mark_messages_read(message_ids)
+            updated_ids = result["updated_ids"]
+            sender_ids = result["sender_ids"]
             if updated_ids:
                 # Broadcast read receipt to the room so sender sees ✓✓
                 await self.channel_layer.group_send(
@@ -75,6 +77,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         "message_ids": updated_ids,
                     },
                 )
+                # Also notify each sender via their notification channel
+                # so they get the update even if they left the chat room
+                for sender_id in sender_ids:
+                    await self.channel_layer.group_send(
+                        f"notifications_{sender_id}",
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "messages_read",
+                                "room_id": str(self.room_id),
+                                "reader_id": self.user.id,
+                                "reader": self.user.username,
+                                "message_ids": updated_ids,
+                            },
+                        },
+                    )
             return
 
         message_content = data.get("message", "")
@@ -169,29 +187,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
         User.objects.filter(id=self.user.id).update(is_online=online)
 
     @database_sync_to_async
-    def mark_messages_read(self, message_ids: list) -> list:
+    def mark_messages_read(self, message_ids: list) -> dict:
         """
         Mark messages as read. Only marks messages NOT sent by the current user.
-        Returns list of message ID strings that were actually updated.
+        Returns dict with updated message ID strings and unique sender IDs.
         """
         if not message_ids:
-            # If no specific IDs, mark all unread messages in the room from other users
             qs = Message.objects.filter(
                 room_id=self.room_id,
                 is_read=False,
             ).exclude(sender=self.user)
-            ids = list(qs.values_list("id", flat=True))
-            qs.update(is_read=True)
-            return [str(mid) for mid in ids]
         else:
             qs = Message.objects.filter(
                 id__in=message_ids,
                 room_id=self.room_id,
                 is_read=False,
             ).exclude(sender=self.user)
-            ids = list(qs.values_list("id", flat=True))
-            qs.update(is_read=True)
-            return [str(mid) for mid in ids]
+        rows = list(qs.values_list("id", "sender_id"))
+        ids = [str(r[0]) for r in rows]
+        sender_ids = list({r[1] for r in rows})
+        qs.update(is_read=True)
+        return {"updated_ids": ids, "sender_ids": sender_ids}
 
 
 class NotificationConsumer(AsyncWebsocketConsumer):
