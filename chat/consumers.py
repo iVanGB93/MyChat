@@ -1,4 +1,5 @@
 import json
+import logging
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -7,6 +8,7 @@ from django.contrib.auth import get_user_model
 from .models import ChatRoom, Message
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class ChatConsumer(AsyncWebsocketConsumer):
@@ -63,9 +65,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # ---- Mark messages as read ----
         if msg_type == "mark_read":
             message_ids = data.get("message_ids", [])
+            logger.info(
+                "[ChatConsumer] mark_read from user=%s room=%s ids=%s",
+                self.user.username, self.room_id, len(message_ids),
+            )
             result = await self.mark_messages_read(message_ids)
             updated_ids = result["updated_ids"]
             sender_ids = result["sender_ids"]
+            logger.info(
+                "[ChatConsumer] marked %d messages as read, senders=%s",
+                len(updated_ids), sender_ids,
+            )
             if updated_ids:
                 # Broadcast read receipt to the room so sender sees ✓✓
                 await self.channel_layer.group_send(
@@ -177,10 +187,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_room_info(self) -> dict:
-        """Return room name and member IDs for notification dispatch."""
+        """Return room name, type, and member IDs for notification dispatch."""
         room = ChatRoom.objects.get(id=self.room_id)
         member_ids = list(room.members.values_list("id", flat=True))
-        return {"name": room.name or str(room.id), "member_ids": member_ids}
+        # For direct chats with no custom name, use the sender's username
+        # so recipients see the sender's name instead of the room UUID.
+        if room.room_type == ChatRoom.DIRECT and not room.name:
+            display_name = self.user.username
+        else:
+            display_name = room.name or str(room.id)
+        return {
+            "name": display_name,
+            "room_type": room.room_type,
+            "member_ids": member_ids,
+        }
 
     @database_sync_to_async
     def set_user_online(self, online: bool):
