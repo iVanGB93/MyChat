@@ -55,6 +55,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         data = json.loads(text_data)
         msg_type = data.get("type", "")
 
+        # ---- Respond to keep-alive pings ----
+        if msg_type == "ping":
+            await self.send(text_data=json.dumps({"type": "pong"}))
+            return
+
         # ---- Mark messages as read ----
         if msg_type == "mark_read":
             message_ids = data.get("message_ids", [])
@@ -226,6 +231,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """
         data = json.loads(text_data)
         msg_type = data.get("type")
+
+        # ---- Respond to keep-alive pings ----
+        if msg_type == "ping":
+            await self.send(text_data=json.dumps({"type": "pong"}))
+            return
 
         if msg_type == "webrtc_signal":
             target_id = data.get("target_user_id")
