@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 
 from .models import CallLog
 from .serializers import CallLogSerializer
+from chat.push import send_call_push
 
 
 def _try_create_livekit_token(room_name: str, identity: str) -> str | None:
@@ -73,6 +74,17 @@ class InitiateCallView(APIView):
                     "room_name": room_name,
                 },
             },
+        )
+
+        # Also send server-side push notification via Expo Push API
+        # This ensures the callee is notified even when the app is closed
+        send_call_push(
+            callee_id=callee_id,
+            caller_name=request.user.username,
+            call_type=call_type,
+            call_id=str(call.id),
+            caller_id=request.user.id,
+            room_name=room_name,
         )
 
         # Optional LiveKit token

@@ -9,6 +9,10 @@ class User(AbstractUser):
     bio = models.CharField(max_length=200, blank=True, default="")
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(auto_now=True)
+    expo_push_token = models.CharField(
+        max_length=200, blank=True, default="",
+        help_text="Expo push notification token for this device",
+    )
 
     class Meta:
         ordering = ["username"]

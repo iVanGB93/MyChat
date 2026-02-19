@@ -15,6 +15,8 @@ urlpatterns = [
     # Profile
     path("profile/", views.ProfileView.as_view(), name="profile"),
     path("search/", views.UserSearchView.as_view(), name="user-search"),
+    # Push notifications
+    path("push-token/", views.RegisterPushTokenView.as_view(), name="push-token"),
     # Contacts
     path("", include(router.urls)),
 ]

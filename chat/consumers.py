@@ -6,6 +6,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from django.contrib.auth import get_user_model
 
 from .models import ChatRoom, Message
+from .push import send_message_push
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -135,9 +136,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # Also notify each room member via their personal notification channel
         # so users NOT viewing this room still see a toast / badge
         room_info = await self.get_room_info()
+        recipient_ids = []
         for member_id in room_info["member_ids"]:
             if member_id == self.user.id:
                 continue
+            recipient_ids.append(member_id)
             await self.channel_layer.group_send(
                 f"notifications_{member_id}",
                 {
@@ -153,6 +156,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         "created_at": message.created_at.isoformat(),
                     },
                 },
+            )
+
+        # Send server-side push notification via Expo Push API
+        # This ensures delivery even when the app is closed
+        if recipient_ids:
+            await self._send_message_push(
+                recipient_ids=recipient_ids,
+                sender_name=self.user.username,
+                content=message_content[:120],
+                room_id=str(self.room_id),
+                room_name=room_info["name"],
             )
 
     async def chat_message(self, event):
@@ -205,6 +219,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def set_user_online(self, online: bool):
         User.objects.filter(id=self.user.id).update(is_online=online)
+
+    @database_sync_to_async
+    def _send_message_push(
+        self, recipient_ids, sender_name, content, room_id, room_name
+    ):
+        """Send Expo push notification for a new message (runs in thread)."""
+        send_message_push(
+            recipient_ids=recipient_ids,
+            sender_name=sender_name,
+            content=content,
+            room_id=room_id,
+            room_name=room_name,
+        )
 
     @database_sync_to_async
     def mark_messages_read(self, message_ids: list) -> dict:
