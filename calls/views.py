@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
+from chat.consumers import is_user_ws_connected
 
 
 def _try_create_livekit_token(room_name: str, identity: str) -> str | None:
@@ -76,16 +77,17 @@ class InitiateCallView(APIView):
             },
         )
 
-        # Also send server-side push notification via Expo Push API
-        # This ensures the callee is notified even when the app is closed
-        send_call_push(
-            callee_id=callee_id,
-            caller_name=request.user.username,
-            call_type=call_type,
-            call_id=str(call.id),
-            caller_id=request.user.id,
-            room_name=room_name,
-        )
+        # Send push notification ONLY if callee is NOT connected via WebSocket.
+        # If they're connected, the WS event above will be delivered in real-time.
+        if not is_user_ws_connected(callee_id):
+            send_call_push(
+                callee_id=callee_id,
+                caller_name=request.user.username,
+                call_type=call_type,
+                call_id=str(call.id),
+                caller_id=request.user.id,
+                room_name=room_name,
+            )
 
         # Optional LiveKit token
         lk_token = _try_create_livekit_token(room_name, request.user.username)

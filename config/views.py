@@ -72,6 +72,10 @@ def monitor_api(request):
     ws_notification_users = get_connected_notification_users()
     ws_chat_rooms = get_connected_chat_rooms()
 
+    # Derive online (foreground) vs connected (background) from WS tracking
+    ws_online = [u for u in ws_notification_users if u.get("app_state") == "active"]
+    ws_background = [u for u in ws_notification_users if u.get("app_state") != "active"]
+
     # ── Messages ──
     total_messages = Message.objects.count()
     messages_last_hour = Message.objects.filter(created_at__gte=one_hour_ago).count()
@@ -120,13 +124,17 @@ def monitor_api(request):
         "server_time": now.isoformat(),
         "users": {
             "total": total_users,
-            "online": online_users.count(),
+            "online_db": online_users.count(),
             "online_list": online_list,
             "with_push_token": users_with_push,
         },
         "websockets": {
             "notification_users": ws_notification_users,
             "notification_count": len(ws_notification_users),
+            "online_count": len(ws_online),
+            "online_users": ws_online,
+            "background_count": len(ws_background),
+            "background_users": ws_background,
             "chat_rooms": ws_chat_rooms,
             "chat_rooms_active": len(ws_chat_rooms),
         },

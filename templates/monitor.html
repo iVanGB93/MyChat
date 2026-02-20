@@ -136,14 +136,18 @@
   <!-- Stats cards -->
   <div class="stats-grid">
     <div class="stat-card success">
-      <div class="value" id="wsConnected">0</div>
-      <div class="label">WS Connected</div>
-    </div>
-    <div class="stat-card">
       <div class="value" id="onlineUsers">0</div>
-      <div class="label">Online Users</div>
+      <div class="label">Online (Foreground)</div>
+    </div>
+    <div class="stat-card" style="border-color: var(--primary);">
+      <div class="value" id="connectedUsers">0</div>
+      <div class="label">Connected (Background)</div>
     </div>
     <div class="stat-card accent">
+      <div class="value" id="totalWs">0</div>
+      <div class="label">Total WS</div>
+    </div>
+    <div class="stat-card">
       <div class="value" id="totalUsers">0</div>
       <div class="label">Total Users</div>
     </div>
@@ -169,12 +173,12 @@
     </div>
   </div>
 
-  <!-- WS Connected Users -->
+  <!-- Online Users (app in foreground) -->
   <div class="section">
     <div class="section-title">
-      WebSocket Connections <span class="badge" id="wsBadge">0</span>
+      Online Users (App Foreground) <span class="badge" id="onlineBadge" style="background:var(--success);">0</span>
     </div>
-    <table class="data-table" id="wsTable">
+    <table class="data-table">
       <thead>
         <tr>
           <th>Status</th>
@@ -183,27 +187,36 @@
           <th>Channels</th>
         </tr>
       </thead>
-      <tbody id="wsBody"></tbody>
+      <tbody id="onlineBody"></tbody>
     </table>
-    <div class="empty" id="wsEmpty" style="display:none;">No WebSocket connections</div>
+    <div class="empty" id="onlineEmpty" style="display:none;">No users with app in foreground</div>
   </div>
 
-  <!-- Online Users -->
+  <!-- Connected Users (app in background, WS alive) -->
   <div class="section">
     <div class="section-title">
-      Online Users (DB) <span class="badge" id="onlineBadge">0</span>
+      Connected Users (Background WS) <span class="badge" id="bgBadge" style="background:var(--accent);">0</span>
     </div>
     <table class="data-table">
       <thead>
         <tr>
           <th>Status</th>
           <th>User</th>
-          <th>Last Seen</th>
+          <th>Connected At</th>
+          <th>Channels</th>
         </tr>
       </thead>
-      <tbody id="onlineBody"></tbody>
+      <tbody id="bgBody"></tbody>
     </table>
-    <div class="empty" id="onlineEmpty" style="display:none;">No online users</div>
+    <div class="empty" id="bgEmpty" style="display:none;">No background connections</div>
+  </div>
+
+  <!-- Offline Users with Push Tokens -->
+  <div class="section">
+    <div class="section-title">
+      Offline Users (Push Only) <span class="badge" id="offlineBadge" style="background:var(--warning);color:#000;">0</span>
+    </div>
+    <p class="text-muted" style="font-size:.85rem;">Users NOT connected via WebSocket but have a push token — will receive notifications via Expo/FCM push.</p>
   </div>
 
   <!-- Active Calls -->
@@ -339,8 +352,9 @@ async function refresh() {
     const d = await res.json();
 
     // Stats cards
-    setVal('wsConnected', d.websockets.notification_count);
-    setVal('onlineUsers', d.users.online);
+    setVal('onlineUsers', d.websockets.online_count);
+    setVal('connectedUsers', d.websockets.background_count);
+    setVal('totalWs', d.websockets.notification_count);
     setVal('totalUsers', d.users.total);
     setVal('pushTokens', d.users.with_push_token);
     setVal('msgsHour', d.messages.last_hour);
@@ -349,8 +363,10 @@ async function refresh() {
     setVal('activeCalls', d.calls.active_count);
 
     // Badges
-    setVal('wsBadge', d.websockets.notification_count);
-    setVal('onlineBadge', d.users.online);
+    setVal('onlineBadge', d.websockets.online_count);
+    setVal('bgBadge', d.websockets.background_count);
+    const offlineWithPush = d.users.with_push_token - d.websockets.notification_count;
+    setVal('offlineBadge', Math.max(0, offlineWithPush));
     setVal('callsBadge', d.calls.active_count);
     setVal('chatRoomsBadge', d.websockets.chat_rooms_active);
 
@@ -362,8 +378,8 @@ async function refresh() {
     setVal('callsToday', d.calls.today_total);
     setVal('missedToday', d.calls.today_missed);
 
-    // WS Users table
-    renderTable('wsBody', 'wsEmpty', d.websockets.notification_users, u =>
+    // Online users table (app in foreground)
+    renderTable('onlineBody', 'onlineEmpty', d.websockets.online_users, u =>
       `<tr>
         <td>${statusDot('green')}</td>
         <td><strong>${u.username}</strong></td>
@@ -372,12 +388,13 @@ async function refresh() {
       </tr>`
     );
 
-    // Online users table
-    renderTable('onlineBody', 'onlineEmpty', d.users.online_list, u =>
+    // Background users table (WS alive, app in background)
+    renderTable('bgBody', 'bgEmpty', d.websockets.background_users, u =>
       `<tr>
-        <td>${statusDot('green')}</td>
+        <td>${statusDot('purple')}</td>
         <td><strong>${u.username}</strong></td>
-        <td>${timeAgo(u.last_seen)}</td>
+        <td>${timeAgo(u.connected_at)}</td>
+        <td>${u.connections}</td>
       </tr>`
     );
 

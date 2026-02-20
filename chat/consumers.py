@@ -6,6 +6,7 @@ from datetime import datetime
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from .models import ChatRoom, Message
 from .push import send_message_push
@@ -15,8 +16,12 @@ logger = logging.getLogger(__name__)
 
 # ---- In-memory connected-user tracking ----
 _connected_lock = threading.Lock()
-# { user_id: { "username": str, "connected_at": str, "channels": set[str] } }
+
+# Notification WS connections
+# { user_id: { "username": str, "connected_at": str, "channels": set[str], "app_state": str } }
 _connected_notification_users: dict[int, dict] = {}
+
+# Chat room WS connections
 # { room_id: set[user_id] }
 _connected_chat_users: dict[str, set[int]] = {}
 
@@ -30,6 +35,7 @@ def get_connected_notification_users() -> list[dict]:
                 "username": info["username"],
                 "connected_at": info["connected_at"],
                 "connections": len(info["channels"]),
+                "app_state": info.get("app_state", "unknown"),
             }
             for uid, info in _connected_notification_users.items()
         ]
@@ -39,6 +45,19 @@ def get_connected_chat_rooms() -> dict[str, int]:
     """Return {room_id: count_of_connected_users}."""
     with _connected_lock:
         return {rid: len(users) for rid, users in _connected_chat_users.items() if users}
+
+
+def is_user_ws_connected(user_id: int) -> bool:
+    """Check if user has an active notification WebSocket."""
+    with _connected_lock:
+        return user_id in _connected_notification_users
+
+
+def is_user_online(user_id: int) -> bool:
+    """Check if user has the app in foreground (online = active app_state)."""
+    with _connected_lock:
+        entry = _connected_notification_users.get(user_id)
+        return entry is not None and entry.get("app_state") == "active"
 
 
 class ChatConsumer(AsyncWebsocketConsumer):
@@ -75,9 +94,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
         with _connected_lock:
             _connected_chat_users.setdefault(self.room_id, set()).add(self.user.id)
 
-        # Mark user as online
-        await self.set_user_online(True)
-
     async def disconnect(self, close_code):
         if hasattr(self, "room_group_name"):
             await self.channel_layer.group_discard(
@@ -89,7 +105,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 room_users = _connected_chat_users.get(self.room_id)
                 if room_users:
                     room_users.discard(self.user.id)
-            await self.set_user_online(False)
 
     async def receive(self, text_data):
         """Handle incoming messages from the WebSocket client."""
@@ -196,15 +211,28 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 },
             )
 
-        # Send server-side push notification via Expo Push API
-        # This ensures delivery even when the app is closed
-        if recipient_ids:
+        # Send push notification ONLY to users NOT connected via WebSocket.
+        # Connected users already receive the event in real-time via WS
+        # and will show a local notification themselves.
+        push_recipients = [
+            uid for uid in recipient_ids if not is_user_ws_connected(uid)
+        ]
+        if push_recipients:
+            logger.info(
+                "[Push] Sending push to %d offline user(s) (of %d total recipients)",
+                len(push_recipients), len(recipient_ids),
+            )
             await self._send_message_push(
-                recipient_ids=recipient_ids,
+                recipient_ids=push_recipients,
                 sender_name=self.user.username,
                 content=message_content[:120],
                 room_id=str(self.room_id),
                 room_name=room_info["name"],
+            )
+        else:
+            logger.info(
+                "[Push] All %d recipient(s) connected via WS — skipping push",
+                len(recipient_ids),
             )
 
     async def chat_message(self, event):
@@ -301,6 +329,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
     and WebRTC signaling (offer / answer / ICE candidates).
 
     Connect:  ws://<host>/ws/notifications/?token=<jwt>
+
+    The client sends {"type": "app_state", "state": "active"|"background"}
+    to report whether the app is in the foreground.
+        - active   → user is "online" (app open, viewing the screen)
+        - background → user is "connected" (WS alive, but app not in foreground)
     """
 
     async def connect(self):
@@ -313,18 +346,21 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
 
-        # Track connected notification user
+        # Track connected notification user (default app_state = "active")
         with _connected_lock:
-            entry = _connected_notification_users.setdefault(
-                self.user.id,
-                {
+            entry = _connected_notification_users.get(self.user.id)
+            if entry:
+                entry["channels"].add(self.channel_name)
+            else:
+                _connected_notification_users[self.user.id] = {
                     "username": self.user.username,
                     "connected_at": datetime.utcnow().isoformat(),
-                    "channels": set(),
-                },
-            )
-            entry["channels"].add(self.channel_name)
-        logger.info("[Monitor] Notification WS connected: user=%s", self.user.username)
+                    "channels": {self.channel_name},
+                    "app_state": "active",
+                }
+        # Mark user as online in DB
+        await self._set_user_online(True)
+        logger.info("[WS] Notification connected: user=%s", self.user.username)
 
     async def disconnect(self, close_code):
         if hasattr(self, "group_name"):
@@ -339,19 +375,14 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     entry["channels"].discard(self.channel_name)
                     if not entry["channels"]:
                         del _connected_notification_users[self.user.id]
-            logger.info("[Monitor] Notification WS disconnected: user=%s", self.user.username)
+            # Mark user offline in DB when last WS disconnects
+            still_connected = is_user_ws_connected(self.user.id)
+            if not still_connected:
+                await self._set_user_online(False)
+            logger.info("[WS] Notification disconnected: user=%s (still_connected=%s)",
+                        self.user.username, still_connected)
 
     async def receive(self, text_data):
-        """
-        Handle WebRTC signaling messages from the client.
-        Expected format:
-        {
-            "type": "webrtc_signal",
-            "target_user_id": <int>,
-            "signal_type": "offer" | "answer" | "ice-candidate",
-            "data": { ... SDP or ICE candidate ... }
-        }
-        """
         data = json.loads(text_data)
         msg_type = data.get("type")
 
@@ -360,6 +391,20 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=json.dumps({"type": "pong"}))
             return
 
+        # ---- App state change (active / background) ----
+        if msg_type == "app_state":
+            state = data.get("state", "active")  # "active" or "background"
+            with _connected_lock:
+                entry = _connected_notification_users.get(self.user.id)
+                if entry:
+                    entry["app_state"] = state
+            is_online = state == "active"
+            await self._set_user_online(is_online)
+            logger.info("[WS] app_state=%s user=%s → is_online=%s",
+                        state, self.user.username, is_online)
+            return
+
+        # ---- WebRTC signaling ----
         if msg_type == "webrtc_signal":
             target_id = data.get("target_user_id")
             signal_type = data.get("signal_type", "unknown")
@@ -393,3 +438,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
     async def notify(self, event):
         """Forward notification payload to client."""
         await self.send(text_data=json.dumps(event["payload"]))
+
+    @database_sync_to_async
+    def _set_user_online(self, online: bool):
+        """Update the is_online flag and last_seen in the database."""
+        User.objects.filter(id=self.user.id).update(
+            is_online=online,
+            last_seen=timezone.now(),
+        )
