@@ -1,0 +1,429 @@
+{% extends "base.html" %}
+{% block title %}Monitor · MyChat{% endblock %}
+
+{% block extra_css %}
+<style>
+  .monitor { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+  .monitor h1 { font-size: 1.6rem; margin-bottom: 8px; }
+  .monitor .subtitle { color: var(--text-muted); font-size: .85rem; margin-bottom: 24px; }
+
+  /* Stats grid */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    text-align: center;
+    transition: border-color .2s;
+  }
+  .stat-card:hover { border-color: var(--primary); }
+  .stat-card .value {
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: var(--primary);
+    line-height: 1;
+  }
+  .stat-card .label {
+    font-size: .8rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .stat-card.success .value { color: var(--success); }
+  .stat-card.warning .value { color: var(--warning); }
+  .stat-card.danger  .value { color: var(--danger); }
+  .stat-card.accent  .value { color: var(--accent); }
+
+  /* Sections */
+  .section { margin-bottom: 32px; }
+  .section-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-title .badge {
+    background: var(--primary);
+    color: #fff;
+    font-size: .75rem;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-weight: 500;
+  }
+
+  /* Tables */
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .85rem;
+  }
+  .data-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--surface2);
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: .7rem;
+    letter-spacing: .5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .data-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .data-table tr:hover td { background: rgba(67, 97, 238, .05); }
+
+  /* Status dots */
+  .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+  }
+  .dot.green  { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .dot.yellow { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+  .dot.red    { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+  .dot.purple { background: var(--accent);  box-shadow: 0 0 6px var(--accent); }
+
+  /* Refresh indicator */
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .refresh-info {
+    font-size: .8rem;
+    color: var(--text-muted);
+  }
+  .refresh-info .tick { color: var(--success); }
+
+  /* Empty state */
+  .empty { color: var(--text-muted); font-style: italic; padding: 12px; }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .stat-card .value { font-size: 1.6rem; }
+  }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="monitor">
+  <div class="topbar">
+    <div>
+      <h1>Server Monitor</h1>
+      <div class="subtitle">Real-time server statistics — auto-refreshes every 3s</div>
+    </div>
+    <div class="refresh-info">
+      <span class="tick">●</span> Last update: <span id="lastUpdate">—</span>
+    </div>
+  </div>
+
+  <!-- Stats cards -->
+  <div class="stats-grid">
+    <div class="stat-card success">
+      <div class="value" id="wsConnected">0</div>
+      <div class="label">WS Connected</div>
+    </div>
+    <div class="stat-card">
+      <div class="value" id="onlineUsers">0</div>
+      <div class="label">Online Users</div>
+    </div>
+    <div class="stat-card accent">
+      <div class="value" id="totalUsers">0</div>
+      <div class="label">Total Users</div>
+    </div>
+    <div class="stat-card warning">
+      <div class="value" id="pushTokens">0</div>
+      <div class="label">Push Tokens</div>
+    </div>
+    <div class="stat-card">
+      <div class="value" id="msgsHour">0</div>
+      <div class="label">Msgs / Hour</div>
+    </div>
+    <div class="stat-card">
+      <div class="value" id="msgs24h">0</div>
+      <div class="label">Msgs / 24h</div>
+    </div>
+    <div class="stat-card danger">
+      <div class="value" id="unreadMsgs">0</div>
+      <div class="label">Unread Msgs</div>
+    </div>
+    <div class="stat-card warning">
+      <div class="value" id="activeCalls">0</div>
+      <div class="label">Active Calls</div>
+    </div>
+  </div>
+
+  <!-- WS Connected Users -->
+  <div class="section">
+    <div class="section-title">
+      WebSocket Connections <span class="badge" id="wsBadge">0</span>
+    </div>
+    <table class="data-table" id="wsTable">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>User</th>
+          <th>Connected At</th>
+          <th>Channels</th>
+        </tr>
+      </thead>
+      <tbody id="wsBody"></tbody>
+    </table>
+    <div class="empty" id="wsEmpty" style="display:none;">No WebSocket connections</div>
+  </div>
+
+  <!-- Online Users -->
+  <div class="section">
+    <div class="section-title">
+      Online Users (DB) <span class="badge" id="onlineBadge">0</span>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>User</th>
+          <th>Last Seen</th>
+        </tr>
+      </thead>
+      <tbody id="onlineBody"></tbody>
+    </table>
+    <div class="empty" id="onlineEmpty" style="display:none;">No online users</div>
+  </div>
+
+  <!-- Active Calls -->
+  <div class="section">
+    <div class="section-title">
+      Active Calls <span class="badge" id="callsBadge">0</span>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Caller</th>
+          <th>Callee</th>
+          <th>State</th>
+          <th>Started</th>
+        </tr>
+      </thead>
+      <tbody id="callsBody"></tbody>
+    </table>
+    <div class="empty" id="callsEmpty" style="display:none;">No active calls</div>
+  </div>
+
+  <!-- Active Chat Rooms (WS) -->
+  <div class="section">
+    <div class="section-title">
+      Active Chat Rooms (WS) <span class="badge" id="chatRoomsBadge">0</span>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Room ID</th>
+          <th>Connected Users</th>
+        </tr>
+      </thead>
+      <tbody id="chatRoomsBody"></tbody>
+    </table>
+    <div class="empty" id="chatRoomsEmpty" style="display:none;">No active chat rooms</div>
+  </div>
+
+  <!-- Recent Messages -->
+  <div class="section">
+    <div class="section-title">
+      Recent Messages <span class="badge">Last 10</span>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>From</th>
+          <th>Type</th>
+          <th>Content</th>
+          <th>Read</th>
+        </tr>
+      </thead>
+      <tbody id="recentBody"></tbody>
+    </table>
+  </div>
+
+  <!-- Room Stats -->
+  <div class="section">
+    <div class="section-title">Room Statistics</div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="value" id="totalRooms">0</div>
+        <div class="label">Total Rooms</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="directRooms">0</div>
+        <div class="label">Direct</div>
+      </div>
+      <div class="stat-card accent">
+        <div class="value" id="groupRooms">0</div>
+        <div class="label">Group</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="totalMsgs">0</div>
+        <div class="label">Total Messages</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="callsToday">0</div>
+        <div class="label">Calls Today</div>
+      </div>
+      <div class="stat-card danger">
+        <div class="value" id="missedToday">0</div>
+        <div class="label">Missed Today</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/monitor/';
+const INTERVAL = 3000;
+
+function timeAgo(iso) {
+  if (!iso) return '—';
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return Math.floor(diff) + 's ago';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+function shortTime(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleTimeString();
+}
+
+function setVal(id, v) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = v;
+}
+
+function renderTable(bodyId, emptyId, rows, renderRow) {
+  const body = document.getElementById(bodyId);
+  const empty = document.getElementById(emptyId);
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '';
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  body.innerHTML = rows.map(renderRow).join('');
+}
+
+function statusDot(color) {
+  return `<span class="dot ${color}"></span>`;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch(API);
+    const d = await res.json();
+
+    // Stats cards
+    setVal('wsConnected', d.websockets.notification_count);
+    setVal('onlineUsers', d.users.online);
+    setVal('totalUsers', d.users.total);
+    setVal('pushTokens', d.users.with_push_token);
+    setVal('msgsHour', d.messages.last_hour);
+    setVal('msgs24h', d.messages.last_24h);
+    setVal('unreadMsgs', d.messages.unread);
+    setVal('activeCalls', d.calls.active_count);
+
+    // Badges
+    setVal('wsBadge', d.websockets.notification_count);
+    setVal('onlineBadge', d.users.online);
+    setVal('callsBadge', d.calls.active_count);
+    setVal('chatRoomsBadge', d.websockets.chat_rooms_active);
+
+    // Room stats
+    setVal('totalRooms', d.rooms.total);
+    setVal('directRooms', d.rooms.direct);
+    setVal('groupRooms', d.rooms.group);
+    setVal('totalMsgs', d.messages.total);
+    setVal('callsToday', d.calls.today_total);
+    setVal('missedToday', d.calls.today_missed);
+
+    // WS Users table
+    renderTable('wsBody', 'wsEmpty', d.websockets.notification_users, u =>
+      `<tr>
+        <td>${statusDot('green')}</td>
+        <td><strong>${u.username}</strong></td>
+        <td>${timeAgo(u.connected_at)}</td>
+        <td>${u.connections}</td>
+      </tr>`
+    );
+
+    // Online users table
+    renderTable('onlineBody', 'onlineEmpty', d.users.online_list, u =>
+      `<tr>
+        <td>${statusDot('green')}</td>
+        <td><strong>${u.username}</strong></td>
+        <td>${timeAgo(u.last_seen)}</td>
+      </tr>`
+    );
+
+    // Active calls table
+    renderTable('callsBody', 'callsEmpty', d.calls.active, c =>
+      `<tr>
+        <td>${statusDot(c.status === 'RINGING' ? 'yellow' : 'green')}</td>
+        <td>${c.caller__username}</td>
+        <td>${c.callee__username}</td>
+        <td>${c.status}</td>
+        <td>${timeAgo(c.started_at)}</td>
+      </tr>`
+    );
+
+    // Active chat rooms
+    const chatRoomRows = Object.entries(d.websockets.chat_rooms).map(
+      ([rid, count]) => ({ rid, count })
+    );
+    renderTable('chatRoomsBody', 'chatRoomsEmpty', chatRoomRows, r =>
+      `<tr>
+        <td style="font-family:monospace;font-size:.8rem;">${r.rid}</td>
+        <td>${r.count}</td>
+      </tr>`
+    );
+
+    // Recent messages
+    const recentBody = document.getElementById('recentBody');
+    recentBody.innerHTML = d.messages.recent.map(m =>
+      `<tr>
+        <td>${shortTime(m.created_at)}</td>
+        <td>${m.sender__username || '—'}</td>
+        <td>${m.message_type}</td>
+        <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.content || '—'}</td>
+        <td>${m.is_read ? statusDot('green') + 'Yes' : statusDot('red') + 'No'}</td>
+      </tr>`
+    ).join('');
+
+    // Last update
+    setVal('lastUpdate', new Date().toLocaleTimeString());
+
+  } catch (err) {
+    console.error('Monitor fetch error:', err);
+  }
+}
+
+refresh();
+setInterval(refresh, INTERVAL);
+</script>
+{% endblock %}

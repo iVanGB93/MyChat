@@ -23,6 +23,9 @@ urlpatterns = [
     path("dashboard/", views.dashboard_view, name="dashboard"),
     path("chat/<uuid:room_id>/", views.chat_room_view, name="chat-room"),
     path("calls/", views.calls_view, name="calls"),
+    # Monitoring dashboard
+    path("monitor/", views.monitor_view, name="monitor"),
+    path("api/monitor/", views.monitor_api, name="monitor-api"),
     # Admin
     path("admin/", admin.site.urls),
     # REST API

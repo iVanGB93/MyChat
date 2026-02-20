@@ -1,5 +1,7 @@
 import json
 import logging
+import threading
+from datetime import datetime
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -10,6 +12,33 @@ from .push import send_message_push
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+
+# ---- In-memory connected-user tracking ----
+_connected_lock = threading.Lock()
+# { user_id: { "username": str, "connected_at": str, "channels": set[str] } }
+_connected_notification_users: dict[int, dict] = {}
+# { room_id: set[user_id] }
+_connected_chat_users: dict[str, set[int]] = {}
+
+
+def get_connected_notification_users() -> list[dict]:
+    """Return list of users connected to the notification WebSocket."""
+    with _connected_lock:
+        return [
+            {
+                "user_id": uid,
+                "username": info["username"],
+                "connected_at": info["connected_at"],
+                "connections": len(info["channels"]),
+            }
+            for uid, info in _connected_notification_users.items()
+        ]
+
+
+def get_connected_chat_rooms() -> dict[str, int]:
+    """Return {room_id: count_of_connected_users}."""
+    with _connected_lock:
+        return {rid: len(users) for rid, users in _connected_chat_users.items() if users}
 
 
 class ChatConsumer(AsyncWebsocketConsumer):
@@ -42,6 +71,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
         await self.accept()
 
+        # Track connected chat user
+        with _connected_lock:
+            _connected_chat_users.setdefault(self.room_id, set()).add(self.user.id)
+
         # Mark user as online
         await self.set_user_online(True)
 
@@ -50,7 +83,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.channel_layer.group_discard(
                 self.room_group_name, self.channel_name
             )
+        # Untrack connected chat user
         if hasattr(self, "user") and not self.user.is_anonymous:
+            with _connected_lock:
+                room_users = _connected_chat_users.get(self.room_id)
+                if room_users:
+                    room_users.discard(self.user.id)
             await self.set_user_online(False)
 
     async def receive(self, text_data):
@@ -275,11 +313,33 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
 
+        # Track connected notification user
+        with _connected_lock:
+            entry = _connected_notification_users.setdefault(
+                self.user.id,
+                {
+                    "username": self.user.username,
+                    "connected_at": datetime.utcnow().isoformat(),
+                    "channels": set(),
+                },
+            )
+            entry["channels"].add(self.channel_name)
+        logger.info("[Monitor] Notification WS connected: user=%s", self.user.username)
+
     async def disconnect(self, close_code):
         if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(
                 self.group_name, self.channel_name
             )
+        # Untrack notification user
+        if hasattr(self, "user") and not self.user.is_anonymous:
+            with _connected_lock:
+                entry = _connected_notification_users.get(self.user.id)
+                if entry:
+                    entry["channels"].discard(self.channel_name)
+                    if not entry["channels"]:
+                        del _connected_notification_users[self.user.id]
+            logger.info("[Monitor] Notification WS disconnected: user=%s", self.user.username)
 
     async def receive(self, text_data):
         """
