@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
-from chat.consumers import is_user_ws_connected
+from chat.consumers import is_user_online
 
 
 def _try_create_livekit_token(room_name: str, identity: str) -> str | None:
@@ -77,9 +77,9 @@ class InitiateCallView(APIView):
             },
         )
 
-        # Send push notification ONLY if callee is NOT connected via WebSocket.
-        # If they're connected, the WS event above will be delivered in real-time.
-        if not is_user_ws_connected(callee_id):
+        # Send push if callee is not in foreground (not connected OR app in background).
+        # Background WS is unreliable — FCM push ensures call notifications always arrive.
+        if not is_user_online(callee_id):
             send_call_push(
                 callee_id=callee_id,
                 caller_name=request.user.username,

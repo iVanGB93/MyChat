@@ -211,15 +211,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 },
             )
 
-        # Send push notification ONLY to users NOT connected via WebSocket.
-        # Connected users already receive the event in real-time via WS
-        # and will show a local notification themselves.
+        # Send push notification to users who are NOT actively in the foreground.
+        # - Not connected via WS at all → definitely send push
+        # - Connected via WS but app in background → also send push (WS unreliable in bg)
+        # - Connected via WS and app in foreground (active) → skip push (WS is reliable)
         push_recipients = [
-            uid for uid in recipient_ids if not is_user_ws_connected(uid)
+            uid for uid in recipient_ids if not is_user_online(uid)
         ]
         if push_recipients:
             logger.info(
-                "[Push] Sending push to %d offline user(s) (of %d total recipients)",
+                "[Push] Sending push to %d user(s) not in foreground (of %d total recipients)",
                 len(push_recipients), len(recipient_ids),
             )
             await self._send_message_push(
@@ -231,7 +232,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             )
         else:
             logger.info(
-                "[Push] All %d recipient(s) connected via WS — skipping push",
+                "[Push] All %d recipient(s) in foreground — skipping push",
                 len(recipient_ids),
             )
 
