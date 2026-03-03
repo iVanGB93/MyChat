@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+import time
 import uuid
 
 from asgiref.sync import async_to_sync
@@ -12,6 +16,76 @@ from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
 from chat.consumers import is_user_ws_connected
+
+
+def _build_ice_servers(connectivity_mode: str = 'auto') -> list[dict]:
+    """
+    Build the list of ICE servers to send to the client based on the
+    user's connectivity mode preference:
+
+      'auto'   → STUN + TURN (WebRTC picks best path automatically)
+      'p2p'    → STUN only   (never relay through TURN)
+      'server' → TURN only   (always relay, iceTransportPolicy='relay')
+    """
+    stun_servers = [
+        {"urls": "stun:stun.l.google.com:19302"},
+        {"urls": "stun:stun1.l.google.com:19302"},
+    ]
+
+    turn_urls = getattr(settings, 'TURN_URLS', [])
+    turn_secret = getattr(settings, 'TURN_SECRET', '')
+    turn_username_static = getattr(settings, 'TURN_USERNAME', '')
+    turn_credential_static = getattr(settings, 'TURN_CREDENTIAL', '')
+    ttl = getattr(settings, 'TURN_TTL', 86400)
+
+    turn_servers = []
+    if turn_urls:
+        if turn_secret:
+            # HMAC time-limited credentials (Coturn `use-auth-secret` mode)
+            expiry = int(time.time()) + ttl
+            username = f"{expiry}:axonic"
+            credential = base64.b64encode(
+                hmac.new(turn_secret.encode(), username.encode(), hashlib.sha1).digest()
+            ).decode()
+        elif turn_username_static and turn_credential_static:
+            # Static credentials
+            username = turn_username_static
+            credential = turn_credential_static
+        else:
+            username = credential = None
+
+        if username and credential:
+            turn_servers = [
+                {"urls": url, "username": username, "credential": credential}
+                for url in turn_urls
+            ]
+
+    if connectivity_mode == 'p2p':
+        return {"ice_servers": stun_servers, "ice_transport_policy": "all"}
+    elif connectivity_mode == 'server':
+        # Force relay — needs TURN servers configured
+        return {"ice_servers": turn_servers or stun_servers, "ice_transport_policy": "relay"}
+    else:  # 'auto'
+        return {"ice_servers": stun_servers + turn_servers, "ice_transport_policy": "all"}
+
+
+class IceConfigView(APIView):
+    """
+    Return ICE server configuration for WebRTC calls.
+
+    The list of servers and transport policy are tailored to the
+    authenticated user's `connectivity_mode` preference:
+      - auto   → STUN + TURN, policy=all  (try P2P, fall back to relay)
+      - p2p    → STUN only,   policy=all  (P2P or bust)
+      - server → TURN only,   policy=relay (always relay)
+
+    GET /api/calls/ice-config/
+    """
+
+    def get(self, request):
+        mode = getattr(request.user, 'connectivity_mode', 'auto')
+        config = _build_ice_servers(mode)
+        return Response(config)
 
 
 def _try_create_livekit_token(room_name: str, identity: str) -> str | None:

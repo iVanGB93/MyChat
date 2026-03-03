@@ -5,6 +5,16 @@ from django.db import models
 class User(AbstractUser):
     """Custom user model with profile fields for the chat app."""
 
+    # Connectivity mode for WebRTC calls
+    CONNECTIVITY_AUTO = 'auto'
+    CONNECTIVITY_P2P = 'p2p'
+    CONNECTIVITY_SERVER = 'server'
+    CONNECTIVITY_CHOICES = [
+        (CONNECTIVITY_AUTO, 'Auto (P2P with relay fallback)'),
+        (CONNECTIVITY_P2P, 'Always P2P'),
+        (CONNECTIVITY_SERVER, 'Always Server (relay)'),
+    ]
+
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
     bio = models.CharField(max_length=200, blank=True, default="")
     is_online = models.BooleanField(default=False)
@@ -12,6 +22,12 @@ class User(AbstractUser):
     expo_push_token = models.CharField(
         max_length=200, blank=True, default="",
         help_text="Expo push notification token for this device",
+    )
+    connectivity_mode = models.CharField(
+        max_length=10,
+        choices=CONNECTIVITY_CHOICES,
+        default=CONNECTIVITY_AUTO,
+        help_text="WebRTC call connection mode preference",
     )
 
     class Meta:

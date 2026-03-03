@@ -221,6 +221,25 @@ LIVEKIT_URL = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
 
 
 # ---------------------------------------------------------------------------
+# TURN / STUN — ICE server configuration for WebRTC P2P calls
+#
+# Set TURN_URLS to a comma-separated list of TURN URLs, e.g.:
+#   TURN_URLS=turn:your-server.com:3478,turns:your-server.com:5349
+#
+# Credentials — two modes:
+#   1. Static (simple):  set TURN_USERNAME + TURN_CREDENTIAL
+#   2. HMAC time-limited (recommended for Coturn):  set TURN_SECRET only
+#      Coturn must have `use-auth-secret` and `static-auth-secret=<TURN_SECRET>`
+# ---------------------------------------------------------------------------
+
+TURN_URLS = [u.strip() for u in os.getenv("TURN_URLS", "").split(",") if u.strip()]
+TURN_SECRET = os.getenv("TURN_SECRET", "")        # HMAC secret (Coturn REST API)
+TURN_USERNAME = os.getenv("TURN_USERNAME", "")    # static username (alternative)
+TURN_CREDENTIAL = os.getenv("TURN_CREDENTIAL", "") # static credential (alternative)
+TURN_TTL = int(os.getenv("TURN_TTL", "86400"))    # credential lifetime in seconds
+
+
+# ---------------------------------------------------------------------------
 # Internationalization / Static / Media
 # ---------------------------------------------------------------------------
 
