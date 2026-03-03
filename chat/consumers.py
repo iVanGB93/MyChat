@@ -211,12 +211,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 },
             )
 
-        # Send push notification to users who are NOT actively in the foreground.
-        # - Not connected via WS at all → definitely send push
-        # - Connected via WS but app in background → also send push (WS unreliable in bg)
-        # - Connected via WS and app in foreground (active) → skip push (WS is reliable)
+        # Send push notification to users with NO active WebSocket connection.
+        # - Not connected via WS → app is closed/killed → send FCM push
+        # - Connected via WS (foreground or background) → WS delivers the message;
+        #   the client shows a local notification if the app is in background.
+        #   Sending FCM here too would cause duplicate notifications.
         push_recipients = [
-            uid for uid in recipient_ids if not is_user_online(uid)
+            uid for uid in recipient_ids if not is_user_ws_connected(uid)
         ]
         if push_recipients:
             logger.info(
