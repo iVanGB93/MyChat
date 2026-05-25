@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import threading
@@ -6,7 +7,9 @@ from datetime import datetime
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
+from rest_framework_simplejwt.tokens import AccessToken
 
 from .models import ChatRoom, Message
 from .push import send_message_push
@@ -60,6 +63,16 @@ def is_user_online(user_id: int) -> bool:
         return entry is not None and entry.get("app_state") == "active"
 
 
+@database_sync_to_async
+def _authenticate_token_async(token_str: str):
+    """Validate a JWT access token string and return the User or AnonymousUser."""
+    try:
+        token = AccessToken(token_str)
+        return User.objects.get(id=token["user_id"])
+    except Exception:
+        return AnonymousUser()
+
+
 class ChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket consumer for real-time chat.
@@ -73,28 +86,46 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.room_id = self.scope["url_route"]["kwargs"]["room_id"]
         self.room_group_name = f"chat_{self.room_id}"
         self.user = self.scope["user"]
+        self._awaiting_auth = False
+        self._accepted = False
+        self._auth_timeout_task = None
 
         if self.user.is_anonymous:
-            await self.close()
+            # Accept first, then wait for a post-connect {type: 'auth'} message
+            await self.accept()
+            self._accepted = True
+            self._awaiting_auth = True
+            self._auth_timeout_task = asyncio.ensure_future(self._auth_timeout())
             return
 
-        # Verify user is a member of the room
+        # Already authenticated via query-string token — complete setup now
+        await self._finish_chat_setup()
+
+    async def _finish_chat_setup(self):
+        """Complete connection setup once self.user is authenticated."""
         is_member = await self.is_room_member()
         if not is_member:
-            await self.close()
+            await self.close(code=4003)
             return
-
-        # Join room group
-        await self.channel_layer.group_add(
-            self.room_group_name, self.channel_name
-        )
-        await self.accept()
-
-        # Track connected chat user
+        await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+        if not self._accepted:
+            await self.accept()
+            self._accepted = True
         with _connected_lock:
             _connected_chat_users.setdefault(self.room_id, set()).add(self.user.id)
 
+    async def _auth_timeout(self):
+        """Close the connection if no auth message arrives within 5 seconds."""
+        await asyncio.sleep(5.0)
+        if self._awaiting_auth:
+            logger.warning("[ChatConsumer] auth timeout — closing unauthenticated WS")
+            await self.close(code=4001)
+
     async def disconnect(self, close_code):
+        # Cancel pending auth timeout
+        if hasattr(self, "_auth_timeout_task") and self._auth_timeout_task:
+            self._auth_timeout_task.cancel()
+            self._auth_timeout_task = None
         if hasattr(self, "room_group_name"):
             await self.channel_layer.group_discard(
                 self.room_group_name, self.channel_name
@@ -110,6 +141,25 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Handle incoming messages from the WebSocket client."""
         data = json.loads(text_data)
         msg_type = data.get("type", "")
+
+        # ---- Post-connect authentication ----
+        if self._awaiting_auth:
+            if msg_type == "auth":
+                token_str = data.get("token", "")
+                user = await _authenticate_token_async(token_str)
+                if user.is_anonymous:
+                    await self.send(text_data=json.dumps({"type": "auth_failed", "reason": "invalid_token"}))
+                    await self.close(code=4001)
+                    return
+                self.user = user
+                self._awaiting_auth = False
+                if self._auth_timeout_task:
+                    self._auth_timeout_task.cancel()
+                    self._auth_timeout_task = None
+                await self._finish_chat_setup()
+                await self.send(text_data=json.dumps({"type": "auth_ok"}))
+            # Ignore all other messages until authenticated
+            return
 
         # ---- Respond to keep-alive pings ----
         if msg_type == "ping":
@@ -330,7 +380,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
     Per-user WebSocket for push-style notifications (incoming calls, etc.)
     and WebRTC signaling (offer / answer / ICE candidates).
 
-    Connect:  ws://<host>/ws/notifications/?token=<jwt>
+    Connect:  ws://<host>/ws/notifications/
+              (then send {"type": "auth", "token": "<jwt>"} as first message)
 
     The client sends {"type": "app_state", "state": "active"|"background"}
     to report whether the app is in the foreground.
@@ -340,15 +391,28 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
         self.user = self.scope["user"]
+        self._awaiting_auth = False
+        self._accepted = False
+        self._auth_timeout_task = None
+
         if self.user.is_anonymous:
-            await self.close()
+            # Accept first, then wait for a post-connect {type: 'auth'} message
+            await self.accept()
+            self._accepted = True
+            self._awaiting_auth = True
+            self._auth_timeout_task = asyncio.ensure_future(self._auth_timeout())
             return
 
+        # Already authenticated via query-string token — complete setup now
+        await self._finish_notification_setup()
+
+    async def _finish_notification_setup(self):
+        """Complete connection setup once self.user is authenticated."""
         self.group_name = f"notifications_{self.user.id}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
-        await self.accept()
-
-        # Track connected notification user (default app_state = "active")
+        if not self._accepted:
+            await self.accept()
+            self._accepted = True
         with _connected_lock:
             entry = _connected_notification_users.get(self.user.id)
             if entry:
@@ -360,11 +424,21 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "channels": {self.channel_name},
                     "app_state": "active",
                 }
-        # Mark user as online in DB
         await self._set_user_online(True)
         logger.info("[WS] Notification connected: user=%s", self.user.username)
 
+    async def _auth_timeout(self):
+        """Close the connection if no auth message arrives within 5 seconds."""
+        await asyncio.sleep(5.0)
+        if self._awaiting_auth:
+            logger.warning("[NotificationConsumer] auth timeout — closing unauthenticated WS")
+            await self.close(code=4001)
+
     async def disconnect(self, close_code):
+        # Cancel pending auth timeout
+        if hasattr(self, "_auth_timeout_task") and self._auth_timeout_task:
+            self._auth_timeout_task.cancel()
+            self._auth_timeout_task = None
         if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(
                 self.group_name, self.channel_name
@@ -387,6 +461,25 @@ class NotificationConsumer(AsyncWebsocketConsumer):
     async def receive(self, text_data):
         data = json.loads(text_data)
         msg_type = data.get("type")
+
+        # ---- Post-connect authentication ----
+        if self._awaiting_auth:
+            if msg_type == "auth":
+                token_str = data.get("token", "")
+                user = await _authenticate_token_async(token_str)
+                if user.is_anonymous:
+                    await self.send(text_data=json.dumps({"type": "auth_failed", "reason": "invalid_token"}))
+                    await self.close(code=4001)
+                    return
+                self.user = user
+                self._awaiting_auth = False
+                if self._auth_timeout_task:
+                    self._auth_timeout_task.cancel()
+                    self._auth_timeout_task = None
+                await self._finish_notification_setup()
+                await self.send(text_data=json.dumps({"type": "auth_ok"}))
+            # Ignore all other messages until authenticated
+            return
 
         # ---- Respond to keep-alive pings ----
         if msg_type == "ping":
