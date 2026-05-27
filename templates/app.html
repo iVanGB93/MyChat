@@ -626,6 +626,9 @@
     // =========================================================================
     let currentToken = localStorage.getItem('access');
     const username = localStorage.getItem('username');
+    // Decode user ID from JWT payload (avoids an extra profile API call)
+    function _decodeJwt(t) { try { return JSON.parse(atob(t.split('.')[1])); } catch { return {}; } }
+    const currentUserId = _decodeJwt(currentToken)?.user_id ?? null;
     if (!currentToken) window.location.href = '/login/';
     document.getElementById('current-user').textContent = username;
 
@@ -873,22 +876,145 @@
     }
 
     // =========================================================================
+    // INDEXEDDB — local message storage (no server persistence)
+    // =========================================================================
+    const IDB_NAME = 'axonic_messages';
+    const IDB_VER = 1;
+    let _idb = null;
+
+    function openIDB() {
+        if (_idb) return Promise.resolve(_idb);
+        return new Promise((res, rej) => {
+            const req = indexedDB.open(IDB_NAME, IDB_VER);
+            req.onupgradeneeded = (ev) => {
+                const db = ev.target.result;
+                if (!db.objectStoreNames.contains('messages')) {
+                    const ms = db.createObjectStore('messages', { keyPath: 'id' });
+                    ms.createIndex('by_room', 'room_id', { unique: false });
+                }
+                if (!db.objectStoreNames.contains('delivery_tracking')) {
+                    db.createObjectStore('delivery_tracking', { keyPath: ['message_id', 'recipient_id'] });
+                }
+            };
+            req.onsuccess = (ev) => { _idb = ev.target.result; res(_idb); };
+            req.onerror = (ev) => rej(ev.target.error);
+        });
+    }
+
+    async function idbSaveMessage(msg) {
+        const db = await openIDB();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('messages', 'readwrite');
+            tx.objectStore('messages').put(msg);
+            tx.oncomplete = res;
+            tx.onerror = (ev) => rej(ev.target.error);
+        });
+    }
+
+    async function idbMessageExists(id) {
+        const db = await openIDB();
+        return new Promise((res) => {
+            const tx = db.transaction('messages', 'readonly');
+            const req = tx.objectStore('messages').getKey(id);
+            req.onsuccess = () => res(!!req.result);
+            req.onerror = () => res(false);
+        });
+    }
+
+    async function idbGetMessages(roomId) {
+        const db = await openIDB();
+        return new Promise((res) => {
+            const tx = db.transaction('messages', 'readonly');
+            const req = tx.objectStore('messages').index('by_room').getAll(roomId);
+            req.onsuccess = () => res(
+                (req.result || []).sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
+            );
+            req.onerror = () => res([]);
+        });
+    }
+
+    async function idbMarkDelivered(messageId, recipientId) {
+        const db = await openIDB();
+        return new Promise((res) => {
+            const tx = db.transaction('delivery_tracking', 'readwrite');
+            tx.objectStore('delivery_tracking').put({ message_id: messageId, recipient_id: recipientId, delivered: 1 });
+            tx.oncomplete = res;
+            tx.onerror = () => res();
+        });
+    }
+
+    async function idbGetPendingOutbox(roomId, recipientId) {
+        const db = await openIDB();
+        const allMsgs = await idbGetMessages(roomId);
+        const myMsgs = allMsgs.filter(m => m.is_mine);
+        const delivered = await new Promise((res) => {
+            const tx = db.transaction('delivery_tracking', 'readonly');
+            const req = tx.objectStore('delivery_tracking').getAll();
+            req.onsuccess = () => res(new Set(
+                (req.result || [])
+                    .filter(r => r.recipient_id === recipientId && r.delivered)
+                    .map(r => r.message_id)
+            ));
+            req.onerror = () => res(new Set());
+        });
+        return myMsgs.filter(m => !delivered.has(m.id));
+    }
+
+    // Flush undelivered outbox messages for a recipient who just connected
+    async function flushOutboxForRecipient(roomId, recipientId) {
+        if (!chatWs || chatWs.readyState !== WebSocket.OPEN || activeRoomId !== roomId) return;
+        try {
+            const msgs = await idbGetPendingOutbox(roomId, recipientId);
+            for (const msg of msgs) {
+                chatWs.send(JSON.stringify({
+                    id: msg.id,
+                    message: msg.content,
+                    message_type: msg.type,
+                    created_at: msg.created_at,
+                }));
+            }
+        } catch { /* ignore */ }
+    }
+
+    // =========================================================================
     // MESSAGES
     // =========================================================================
     async function loadMessages() {
         const container = document.getElementById('messages');
         container.innerHTML = '<div class="empty-chat" id="empty-chat">No messages yet — say hi!</div>';
 
-        const res = await apiFetch(`/api/chat/rooms/${activeRoomId}/messages/`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const messages = data.results || data;
+        await openIDB();
 
+        // One-time migration: pull server history into IndexedDB on first open
+        const migKey = `history_migrated_${activeRoomId}`;
+        if (!localStorage.getItem(migKey)) {
+            try {
+                const res = await apiFetch(`/api/chat/rooms/${activeRoomId}/messages/`);
+                if (res.ok) {
+                    const data = await res.json();
+                    for (const m of (data.results || data)) {
+                        await idbSaveMessage({
+                            id: m.id,
+                            room_id: activeRoomId,
+                            sender_id: m.sender,
+                            sender_name: m.sender_username,
+                            content: m.content,
+                            type: m.message_type,
+                            created_at: m.created_at,
+                            is_mine: m.sender === currentUserId,
+                        });
+                    }
+                    localStorage.setItem(migKey, '1');
+                }
+            } catch { /* ignore — will retry on next open */ }
+        }
+
+        const messages = await idbGetMessages(activeRoomId);
         if (messages.length === 0) return;
         const emptyEl = document.getElementById('empty-chat');
         if (emptyEl) emptyEl.remove();
         container.innerHTML = messages.map(m =>
-            renderMessage(m.sender_username, m.content, m.created_at)
+            renderMessage(m.sender_name, m.content, m.created_at)
         ).join('');
         scrollToBottom();
     }
@@ -929,23 +1055,60 @@
         chatWs.onopen = () => {
             document.getElementById('ws-status').innerHTML =
                 '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:4px;"></span>Online';
+            // Announce readiness to receive pending messages from offline senders
+            chatWs.send(JSON.stringify({ type: 'ready_to_receive' }));
         };
 
-        chatWs.onmessage = (e) => {
+        chatWs.onmessage = async (e) => {
             try {
                 const msg = JSON.parse(e.data);
+                const msgType = msg.type || '';
+
+                if (msgType === 'message_server_ack') {
+                    console.log('[CHAT WS] server_ack', msg.message_id);
+                    return;
+                }
+                if (msgType === 'pong') return;
+                if (msgType === 'messages_read') return;
+
                 const sender = msg.sender || msg.sender_username;
-                const emptyEl = document.getElementById('empty-chat');
-                if (emptyEl) emptyEl.remove();
-                const container = document.getElementById('messages');
-                container.insertAdjacentHTML('beforeend', renderMessage(
-                    sender,
-                    msg.content || msg.message,
-                    msg.created_at || new Date().toISOString()
-                ));
-                scrollToBottom();
-                // Sound: incoming from someone else
-                if (sender !== username) soundMessageIn();
+                const msgId = msg.id;
+                if (!msgId) return;
+
+                const exists = await idbMessageExists(msgId);
+                if (!exists) {
+                    await idbSaveMessage({
+                        id: msgId,
+                        room_id: activeRoomId,
+                        sender_id: msg.sender_id,
+                        sender_name: sender,
+                        content: msg.content || msg.message || '',
+                        type: msg.message_type || 'text',
+                        created_at: msg.created_at || new Date().toISOString(),
+                        is_mine: msg.sender_id === currentUserId,
+                    });
+                    // Only render messages from others (own messages rendered on send)
+                    if (msg.sender_id !== currentUserId) {
+                        const emptyEl = document.getElementById('empty-chat');
+                        if (emptyEl) emptyEl.remove();
+                        const container = document.getElementById('messages');
+                        container.insertAdjacentHTML('beforeend', renderMessage(
+                            sender,
+                            msg.content || msg.message,
+                            msg.created_at || new Date().toISOString()
+                        ));
+                        scrollToBottom();
+                        soundMessageIn();
+                    }
+                }
+                // Ack messages from other users so PendingDelivery is cleared
+                if (msg.sender_id !== currentUserId && chatWs.readyState === WebSocket.OPEN) {
+                    chatWs.send(JSON.stringify({
+                        type: 'message_ack',
+                        message_id: msgId,
+                        sender_id: msg.sender_id,
+                    }));
+                }
             } catch (err) {
                 console.error('[CHAT WS] render error:', err);
             }
@@ -963,12 +1126,41 @@
         chatWs.onerror = () => chatWs.close();
     }
 
-    function sendMessage() {
+    async function sendMessage() {
         const input = document.getElementById('msg-input');
         const text = input.value.trim();
         if (!text) return;
         if (!chatWs || chatWs.readyState !== WebSocket.OPEN) return;
-        chatWs.send(JSON.stringify({ message: text, message_type: 'text' }));
+
+        const msgId = crypto.randomUUID();
+        const createdAt = new Date().toISOString();
+
+        // Persist locally before sending
+        await idbSaveMessage({
+            id: msgId,
+            room_id: activeRoomId,
+            sender_id: currentUserId,
+            sender_name: username,
+            content: text,
+            type: 'text',
+            created_at: createdAt,
+            is_mine: true,
+        });
+
+        chatWs.send(JSON.stringify({
+            id: msgId,
+            message: text,
+            message_type: 'text',
+            created_at: createdAt,
+        }));
+
+        // Show immediately in UI (echo from WS will be deduped)
+        const emptyEl = document.getElementById('empty-chat');
+        if (emptyEl) emptyEl.remove();
+        const container = document.getElementById('messages');
+        container.insertAdjacentHTML('beforeend', renderMessage(username, text, createdAt));
+        scrollToBottom();
+
         soundMessageOut();
         input.value = '';
         input.focus();
@@ -1024,9 +1216,21 @@
         const tok = localStorage.getItem('access');
         notifWs = new WebSocket(`${wsProto}://${location.host}/ws/notifications/?token=${tok}`);
 
-        notifWs.onmessage = (e) => {
+        notifWs.onmessage = async (e) => {
             const data = JSON.parse(e.data);
             console.log('[NOTIF]', data);
+
+            // ---- top-level type messages (not event-based) ----
+            if (data.type === 'pending_deliveries') {
+                // Pending rooms: messages will be delivered when user opens those rooms
+                // (ready_to_receive is sent on chatWs.onopen)
+                console.log('[NOTIF] pending deliveries for rooms:', (data.deliveries || []).map(d => d.room_id));
+                return;
+            }
+            if (data.type === 'peer_sync_available') {
+                // TODO Phase 8: peer sync
+                return;
+            }
 
             switch (data.event) {
                 case 'incoming_call':
@@ -1044,7 +1248,43 @@
                 case 'signal_ack':
                     console.log('[SIGNAL] ack: server forwarded', data.signal_type, 'to user', data.target_user_id);
                     break;
+                case 'receiver_ready':
+                    // A recipient connected — flush our outbox for them
+                    flushOutboxForRecipient(data.room_id, data.user_id).catch(() => {});
+                    break;
+                case 'message_delivery_ack':
+                    // Recipient stored our message
+                    if (data.message_id && data.by_user_id) {
+                        idbMarkDelivered(data.message_id, data.by_user_id).catch(() => {});
+                    }
+                    break;
                 case 'new_message':
+                    // Save to IndexedDB if we're not currently viewing that room
+                    if (data.message_id && data.sender_id !== undefined) {
+                        idbMessageExists(data.message_id).then(async (exists) => {
+                            if (!exists) {
+                                await idbSaveMessage({
+                                    id: data.message_id,
+                                    room_id: data.room_id,
+                                    sender_id: data.sender_id,
+                                    sender_name: data.sender || data.from_username || '',
+                                    content: data.content || '',
+                                    type: data.message_type || 'text',
+                                    created_at: data.created_at || new Date().toISOString(),
+                                    is_mine: false,
+                                });
+                            }
+                            // Ack so server deletes PendingDelivery
+                            if (notifWs && notifWs.readyState === WebSocket.OPEN) {
+                                notifWs.send(JSON.stringify({
+                                    type: 'message_ack',
+                                    message_id: data.message_id,
+                                    sender_id: data.sender_id,
+                                    room_id: data.room_id,
+                                }));
+                            }
+                        }).catch(() => {});
+                    }
                     handleNewMessageNotification(data);
                     break;
             }

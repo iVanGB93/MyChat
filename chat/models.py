@@ -53,3 +53,32 @@ class Message(models.Model):
 
     def __str__(self) -> str:
         return f"{self.sender} in {self.room} @ {self.created_at:%H:%M}"
+
+
+class PendingDelivery(models.Model):
+    """
+    Signals that from_user has at least one message queued for to_user in room.
+    No message content is stored — this is signaling metadata only.
+    Deleted when to_user acknowledges receipt of all messages from from_user in room.
+    """
+
+    room = models.ForeignKey(
+        ChatRoom, on_delete=models.CASCADE, related_name="pending_deliveries"
+    )
+    from_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="pending_outbox",
+    )
+    to_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="pending_inbox",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("room", "from_user", "to_user")
+
+    def __str__(self) -> str:
+        return f"{self.from_user} → {self.to_user} in {self.room}"

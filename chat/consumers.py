@@ -11,7 +11,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
-from .models import ChatRoom, Message
+from .models import ChatRoom, Message, PendingDelivery
 from .push import send_message_push
 
 User = get_user_model()
@@ -61,6 +61,19 @@ def is_user_online(user_id: int) -> bool:
     with _connected_lock:
         entry = _connected_notification_users.get(user_id)
         return entry is not None and entry.get("app_state") == "active"
+
+
+def get_user_notification_channels(user_id: int) -> set[str]:
+    """Return all notification WS channel names for a user (empty set if offline)."""
+    with _connected_lock:
+        entry = _connected_notification_users.get(user_id)
+        return set(entry["channels"]) if entry else set()
+
+
+def get_connected_chat_user_ids(room_id: str) -> set[int]:
+    """Return IDs of users currently connected to the chat WS for a room."""
+    with _connected_lock:
+        return set(_connected_chat_users.get(str(room_id), set()))
 
 
 @database_sync_to_async
@@ -209,25 +222,67 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     )
             return
 
-        message_content = data.get("message", "")
-        message_type = data.get("message_type", "text")
-
-        if not message_content:
+        # ---- ready_to_receive: offline user connected — signal senders to flush outbox ----
+        if msg_type == "ready_to_receive":
+            pending_senders = await self.get_pending_senders_for_room()
+            for sender_id in pending_senders:
+                for channel in get_user_notification_channels(sender_id):
+                    await self.channel_layer.send(
+                        channel,
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "receiver_ready",
+                                "room_id": str(self.room_id),
+                                "user_id": self.user.id,
+                                "username": self.user.username,
+                            },
+                        },
+                    )
             return
 
-        # Persist message to database
-        message = await self.save_message(message_content, message_type)
+        # ---- message_ack: receiver confirmed it stored the message locally ----
+        if msg_type == "message_ack":
+            message_id = data.get("message_id", "")
+            sender_id = data.get("sender_id")
+            if not message_id or not sender_id:
+                return
+            await self.delete_pending_delivery(int(sender_id))
+            for channel in get_user_notification_channels(int(sender_id)):
+                await self.channel_layer.send(
+                    channel,
+                    {
+                        "type": "notify",
+                        "payload": {
+                            "event": "message_delivery_ack",
+                            "message_id": message_id,
+                            "by_user_id": self.user.id,
+                            "by_username": self.user.username,
+                            "room_id": str(self.room_id),
+                        },
+                    },
+                )
+            return
+
+        # ---- Outgoing message relay (no DB persistence) ----
+        message_content = data.get("message", "")
+        message_type_str = data.get("message_type", "text")
+        message_id = data.get("id", "")           # client-generated UUID
+        created_at = data.get("created_at", timezone.now().isoformat())
+
+        if not message_content or not message_id:
+            return
 
         msg_data = {
-            "id": str(message.id),
+            "id": message_id,
             "sender": self.user.username,
             "sender_id": self.user.id,
             "content": message_content,
-            "message_type": message_type,
-            "created_at": message.created_at.isoformat(),
+            "message_type": message_type_str,
+            "created_at": created_at,
         }
 
-        # Broadcast to room group (for users with the chat open)
+        # Broadcast to all users currently in this room's chat WS
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -236,43 +291,49 @@ class ChatConsumer(AsyncWebsocketConsumer):
             },
         )
 
-        # Also notify each room member via their personal notification channel
-        # so users NOT viewing this room still see a toast / badge
+        # For members NOT in the room chat WS:
+        # relay via ALL their notification channels (multi-device),
+        # or create a PendingDelivery + push if completely offline.
         room_info = await self.get_room_info()
-        recipient_ids = []
+        in_room_ids = get_connected_chat_user_ids(self.room_id)
+        push_recipients: list[int] = []
+
         for member_id in room_info["member_ids"]:
             if member_id == self.user.id:
                 continue
-            recipient_ids.append(member_id)
-            await self.channel_layer.group_send(
-                f"notifications_{member_id}",
-                {
-                    "type": "notify",
-                    "payload": {
-                        "event": "new_message",
-                        "room_id": str(self.room_id),
-                        "room_name": room_info["name"],
-                        "sender": self.user.username,
-                        "sender_id": self.user.id,
-                        "content": message_content[:120],
-                        "message_id": str(message.id),
-                        "created_at": message.created_at.isoformat(),
-                    },
-                },
-            )
+            if member_id in in_room_ids:
+                continue  # already delivered via room group_send above
 
-        # Send push notification to users with NO active WebSocket connection.
-        # - Not connected via WS → app is closed/killed → send FCM push
-        # - Connected via WS (foreground or background) → WS delivers the message;
-        #   the client shows a local notification if the app is in background.
-        #   Sending FCM here too would cause duplicate notifications.
-        push_recipients = [
-            uid for uid in recipient_ids if not is_user_ws_connected(uid)
-        ]
+            member_channels = get_user_notification_channels(member_id)
+            if member_channels:
+                # Online — relay to ALL notification sessions (multi-device support)
+                for channel in member_channels:
+                    await self.channel_layer.send(
+                        channel,
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "new_message",
+                                "room_id": str(self.room_id),
+                                "room_name": room_info["name"],
+                                "sender": self.user.username,
+                                "sender_id": self.user.id,
+                                "content": message_content,
+                                "message_id": message_id,
+                                "message_type": message_type_str,
+                                "created_at": created_at,
+                            },
+                        },
+                    )
+            else:
+                # Offline — create PendingDelivery record and queue for push
+                await self.create_pending_delivery(member_id)
+                push_recipients.append(member_id)
+
         if push_recipients:
             logger.info(
-                "[Push] Sending push to %d user(s) not in foreground (of %d total recipients)",
-                len(push_recipients), len(recipient_ids),
+                "[Push] Sending push to %d offline user(s) (of %d total recipients)",
+                len(push_recipients), len(room_info["member_ids"]) - 1,
             )
             await self._send_message_push(
                 recipient_ids=push_recipients,
@@ -281,11 +342,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 room_id=str(self.room_id),
                 room_name=room_info["name"],
             )
-        else:
-            logger.info(
-                "[Push] All %d recipient(s) in foreground — skipping push",
-                len(recipient_ids),
-            )
+
+        # Acknowledge to sender: server received and relayed this message
+        await self.send(text_data=json.dumps({
+            "type": "message_server_ack",
+            "message_id": message_id,
+        }))
 
     async def chat_message(self, event):
         """Send message to WebSocket client."""
@@ -309,12 +371,28 @@ class ChatConsumer(AsyncWebsocketConsumer):
         ).exists()
 
     @database_sync_to_async
-    def save_message(self, content: str, message_type: str) -> Message:
-        return Message.objects.create(
+    def create_pending_delivery(self, to_user_id: int) -> None:
+        PendingDelivery.objects.get_or_create(
             room_id=self.room_id,
-            sender=self.user,
-            content=content,
-            message_type=message_type,
+            from_user_id=self.user.id,
+            to_user_id=to_user_id,
+        )
+
+    @database_sync_to_async
+    def delete_pending_delivery(self, from_user_id: int) -> None:
+        PendingDelivery.objects.filter(
+            room_id=self.room_id,
+            from_user_id=from_user_id,
+            to_user_id=self.user.id,
+        ).delete()
+
+    @database_sync_to_async
+    def get_pending_senders_for_room(self) -> list[int]:
+        return list(
+            PendingDelivery.objects.filter(
+                room_id=self.room_id,
+                to_user=self.user,
+            ).values_list("from_user_id", flat=True)
         )
 
     @database_sync_to_async
@@ -425,6 +503,25 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "app_state": "active",
                 }
         await self._set_user_online(True)
+
+        # Notify client of any messages waiting for delivery from offline senders
+        pending = await self.get_pending_deliveries()
+        if pending:
+            await self.send(text_data=json.dumps({
+                "type": "pending_deliveries",
+                "deliveries": pending,
+            }))
+
+        # If the user has other active sessions, offer peer sync
+        with _connected_lock:
+            entry = _connected_notification_users.get(self.user.id)
+            other_channels = (
+                [c for c in entry["channels"] if c != self.channel_name]
+                if entry else []
+            )
+        if other_channels:
+            await self.send(text_data=json.dumps({"type": "peer_sync_available"}))
+
         logger.info("[WS] Notification connected: user=%s", self.user.username)
 
     async def _auth_timeout(self):
@@ -499,6 +596,72 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         state, self.user.username, is_online)
             return
 
+        # ---- Message delivery ack (for users who received via notification WS) ----
+        if msg_type == "message_ack":
+            message_id = data.get("message_id", "")
+            sender_id = data.get("sender_id")
+            room_id = data.get("room_id", "")
+            if not message_id or not sender_id or not room_id:
+                return
+            await self.delete_pending_delivery_notif(int(sender_id), room_id)
+            for channel in get_user_notification_channels(int(sender_id)):
+                await self.channel_layer.send(
+                    channel,
+                    {
+                        "type": "notify",
+                        "payload": {
+                            "event": "message_delivery_ack",
+                            "message_id": message_id,
+                            "by_user_id": self.user.id,
+                            "by_username": self.user.username,
+                            "room_id": room_id,
+                        },
+                    },
+                )
+            return
+
+        # ---- Peer sync: relay request to another session of same user ----
+        if msg_type == "request_sync":
+            rooms_data = data.get("rooms", [])
+            with _connected_lock:
+                entry = _connected_notification_users.get(self.user.id)
+                other_channels = (
+                    [c for c in entry["channels"] if c != self.channel_name]
+                    if entry else []
+                )
+            if not other_channels:
+                return
+            await self.channel_layer.send(
+                other_channels[0],
+                {
+                    "type": "notify",
+                    "payload": {
+                        "event": "peer_sync_request",
+                        "requester_channel": self.channel_name,
+                        "rooms": rooms_data,
+                    },
+                },
+            )
+            return
+
+        # ---- Peer sync: relay sync_messages back to requesting session ----
+        if msg_type == "sync_messages":
+            target_channel = data.get("target_channel")
+            if not target_channel:
+                return
+            await self.channel_layer.send(
+                target_channel,
+                {
+                    "type": "notify",
+                    "payload": {
+                        "event": "sync_messages",
+                        "room_id": data.get("room_id"),
+                        "messages": data.get("messages", []),
+                    },
+                },
+            )
+            return
+
         # ---- WebRTC signaling ----
         if msg_type == "webrtc_signal":
             target_id = data.get("target_user_id")
@@ -541,3 +704,27 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             is_online=online,
             last_seen=timezone.now(),
         )
+
+    @database_sync_to_async
+    def get_pending_deliveries(self) -> list[dict]:
+        rows = PendingDelivery.objects.filter(
+            to_user=self.user,
+        ).select_related("from_user").values(
+            "from_user__id", "from_user__username", "room_id"
+        )
+        return [
+            {
+                "from_user_id": r["from_user__id"],
+                "from_username": r["from_user__username"],
+                "room_id": str(r["room_id"]),
+            }
+            for r in rows
+        ]
+
+    @database_sync_to_async
+    def delete_pending_delivery_notif(self, from_user_id: int, room_id: str) -> None:
+        PendingDelivery.objects.filter(
+            room_id=room_id,
+            from_user_id=from_user_id,
+            to_user=self.user,
+        ).delete()
