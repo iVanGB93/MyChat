@@ -186,29 +186,32 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "[ChatConsumer] mark_read from user=%s room=%s ids=%s",
                 self.user.username, self.room_id, len(message_ids),
             )
+            # Update DB records if they exist (server-stored messages only)
             result = await self.mark_messages_read(message_ids)
-            updated_ids = result["updated_ids"]
-            sender_ids = result["sender_ids"]
             logger.info(
-                "[ChatConsumer] marked %d messages as read, senders=%s",
-                len(updated_ids), sender_ids,
+                "[ChatConsumer] DB updated %d messages as read",
+                len(result["updated_ids"]),
             )
-            if updated_ids:
-                # Broadcast read receipt to the room so sender sees ✓✓
+            # Messages sent via WS are NOT stored server-side, so use the
+            # client-provided IDs directly rather than waiting for DB records.
+            broadcast_ids = message_ids if message_ids else result["updated_ids"]
+            if broadcast_ids:
+                # Broadcast to all users in the room's chat WS
                 await self.channel_layer.group_send(
                     self.room_group_name,
                     {
                         "type": "messages_read",
                         "reader_id": self.user.id,
                         "reader": self.user.username,
-                        "message_ids": updated_ids,
+                        "message_ids": broadcast_ids,
                     },
                 )
-                # Also notify each sender via their notification channel
-                # so they get the update even if they left the chat room
-                for sender_id in sender_ids:
+                # Notify all room members via their notification WS channels
+                # (sender info is not tracked server-side for WS-native messages)
+                member_ids = await self.get_room_member_ids_except_self()
+                for member_id in member_ids:
                     await self.channel_layer.group_send(
-                        f"notifications_{sender_id}",
+                        f"notifications_{member_id}",
                         {
                             "type": "notify",
                             "payload": {
@@ -216,7 +219,39 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 "room_id": str(self.room_id),
                                 "reader_id": self.user.id,
                                 "reader": self.user.username,
-                                "message_ids": updated_ids,
+                                "message_ids": broadcast_ids,
+                            },
+                        },
+                    )
+            return
+
+        # ---- message_update: relay a mutation (is_read, reactions, …) to all room members ----
+        # The server never inspects or stores the payload — it's a pure relay channel.
+        # Changes are {is_read?, reactions?, is_deleted?, content?} keyed by message_id.
+        if msg_type == "message_update":
+            updates = data.get("updates", [])
+            if updates:
+                # Relay to all users in the chat-room WebSocket group (sender excluded
+                # by the message_update_broadcast handler below)
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "message_update_broadcast",
+                        "sender_id": self.user.id,
+                        "updates": updates,
+                    },
+                )
+                # Also relay via notification channels for members not in the chat WS
+                member_ids = await self.get_room_member_ids_except_self()
+                for member_id in member_ids:
+                    await self.channel_layer.group_send(
+                        f"notifications_{member_id}",
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "message_update",
+                                "room_id": str(self.room_id),
+                                "updates": updates,
                             },
                         },
                     )
@@ -362,6 +397,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "message_ids": event["message_ids"],
         }))
 
+    async def message_update_broadcast(self, event):
+        """Relay a message_update event to the WebSocket client. Skip the originating sender."""
+        if event.get("sender_id") == self.user.id:
+            return
+        await self.send(text_data=json.dumps({
+            "type": "message_update",
+            "updates": event["updates"],
+        }))
+
     # --- Database helpers (run in thread) ---
 
     @database_sync_to_async
@@ -451,6 +495,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         sender_ids = list({r[1] for r in rows})
         qs.update(is_read=True)
         return {"updated_ids": ids, "sender_ids": sender_ids}
+
+    @database_sync_to_async
+    def get_room_member_ids_except_self(self) -> list[int]:
+        """Return IDs of all room members except the current user."""
+        room = ChatRoom.objects.get(id=self.room_id)
+        return list(room.members.exclude(id=self.user.id).values_list("id", flat=True))
 
 
 class NotificationConsumer(AsyncWebsocketConsumer):
