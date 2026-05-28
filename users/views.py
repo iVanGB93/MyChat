@@ -57,52 +57,50 @@ class RegisterPushTokenView(APIView):
 
 class PendingNotificationsView(APIView):
     """
-    Returns unread messages and active incoming calls for the
-    authenticated user.  Used by the mobile app's background fetch
+    Returns pending message deliveries and active incoming calls for the
+    authenticated user.  Used by the mobile app's background fetch / reconnect
     to show local notifications when the WebSocket is disconnected.
+
+    NOTE: Chat messages are NOT stored server-side (WS-only, local-first).
+    This endpoint reports PendingDelivery records — signaling metadata that
+    tells the client "sender X has messages waiting for you in room Y".
+    The actual message content was already sent via Expo push notification
+    at send-time; this is purely a reconnect-fallback reminder.
 
     GET /api/users/notifications/pending/
     """
 
     def get(self, request):
-        from chat.models import Message, ChatRoom
+        from chat.models import PendingDelivery, ChatRoom
         from calls.models import CallLog
         import datetime
 
         user = request.user
         result = {"messages": [], "calls": []}
 
-        # ---- Unread messages (last 50, grouped by room) ----
-        unread = (
-            Message.objects.filter(
-                room__members=user,
-                is_read=False,
-            )
-            .exclude(sender=user)
-            .select_related("sender", "room")
-            .order_by("-created_at")[:50]
+        # ---- Pending deliveries (one entry per room × sender pair) ----
+        pending = (
+            PendingDelivery.objects.filter(to_user=user)
+            .select_related("from_user", "room")
+            .order_by("created_at")
         )
 
-        seen_rooms: set = set()
-        for msg in unread:
-            room_id = str(msg.room_id)
-            if room_id in seen_rooms:
-                continue
-            seen_rooms.add(room_id)
-
-            # Compute display name
-            room = msg.room
+        for pd in pending:
+            room = pd.room
+            # Display name: for direct rooms with no custom name use sender's username
             if room.room_type == ChatRoom.DIRECT and not room.name:
-                display_name = msg.sender.username
+                display_name = pd.from_user.username
             else:
-                display_name = room.name or msg.sender.username
+                display_name = room.name or pd.from_user.username
 
             result["messages"].append({
-                "room_id": room_id,
+                "room_id": str(pd.room_id),
                 "room_name": display_name,
-                "sender": msg.sender.username,
-                "content": msg.content[:200],
-                "created_at": msg.created_at.isoformat(),
+                "sender": pd.from_user.username,
+                # Content not stored server-side; client already got the actual
+                # content via Expo push at send-time.
+                "content": "New messages waiting",
+                "created_at": pd.created_at.isoformat(),
             })
 
         # ---- Active incoming calls (ringing in last 60 seconds) ----

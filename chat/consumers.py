@@ -252,6 +252,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 "event": "message_update",
                                 "room_id": str(self.room_id),
                                 "updates": updates,
+                                # Sender info so the recipient can show "X reacted 👍" etc.
+                                "from_user_id": self.user.id,
+                                "from_username": self.user.username,
                             },
                         },
                     )
