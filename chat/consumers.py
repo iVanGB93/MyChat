@@ -132,7 +132,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Close the connection if no auth message arrives within auth timeout."""
         await asyncio.sleep(WS_AUTH_TIMEOUT_SECONDS)
         if self._awaiting_auth:
-            logger.warning("[ChatConsumer] auth timeout — closing unauthenticated WS")
+            client = self.scope.get("client") or ["?", 0]
+            logger.warning(
+                "[ChatConsumer] auth timeout — closing unauthenticated WS room=%s peer=%s:%s",
+                getattr(self, "room_id", "?"), client[0], client[1],
+            )
             await self.close(code=4001)
 
     async def disconnect(self, close_code):
@@ -599,7 +603,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """Close the connection if no auth message arrives within auth timeout."""
         await asyncio.sleep(WS_AUTH_TIMEOUT_SECONDS)
         if self._awaiting_auth:
-            logger.warning("[NotificationConsumer] auth timeout — closing unauthenticated WS")
+            client = self.scope.get("client") or ["?", 0]
+            logger.warning(
+                "[NotificationConsumer] auth timeout — closing unauthenticated WS peer=%s:%s",
+                client[0], client[1],
+            )
             await self.close(code=4001)
 
     async def disconnect(self, close_code):
@@ -786,7 +794,25 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def _set_user_online(self, online: bool):
-        """Update the is_online flag and last_seen in the database."""
+        """Update the is_online flag and last_seen in the database.
+
+        Skip the UPDATE if the desired state already matches what's stored.
+        This avoids a write storm during reconnect loops or rapid app_state
+        toggles, both of which were observed to amplify connection instability.
+        """
+        current = User.objects.filter(id=self.user.id).values_list(
+            "is_online", flat=True
+        ).first()
+        if current is None or current == online:
+            # Even on a no-op, refresh last_seen so monitoring stays accurate,
+            # but cap it to once every ~30s to avoid hot-path writes.
+            from datetime import timedelta
+            now = timezone.now()
+            User.objects.filter(
+                id=self.user.id,
+                last_seen__lt=now - timedelta(seconds=30),
+            ).update(last_seen=now)
+            return
         User.objects.filter(id=self.user.id).update(
             is_online=online,
             last_seen=timezone.now(),
