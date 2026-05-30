@@ -52,15 +52,44 @@
         margin-top: 4px;
         text-align: right;
     }
-    .message-sent .message-time { color: rgba(255,255,255,0.6); }
+    .message-sent .message-time { color: rgba(255,255,255,0.7); }
+    .message-ticks { display: inline-block; margin-left: 6px; }
+    .message-deleted { font-style: italic; opacity: 0.7; }
+    .reply-quote {
+        border-left: 3px solid var(--accent);
+        background: rgba(0,0,0,0.12);
+        padding: 4px 8px;
+        margin-bottom: 6px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        opacity: 0.9;
+    }
+    .reply-quote .reply-name { font-weight: 600; color: var(--accent); }
+    .reply-quote .reply-text { color: var(--text-muted); }
+    .message-image {
+        max-width: 220px;
+        max-height: 220px;
+        border-radius: 8px;
+        display: block;
+        cursor: pointer;
+    }
+    .message audio { width: 100%; max-width: 260px; }
+    .reactions-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .reaction-badge {
+        font-size: 0.72rem;
+        background: rgba(0,0,0,0.18);
+        padding: 1px 6px;
+        border-radius: 10px;
+    }
     .chat-input-area {
         padding: 14px 24px;
         background: var(--surface);
         border-top: 1px solid var(--border);
         display: flex;
         gap: 10px;
+        flex-wrap: wrap;
     }
-    .chat-input-area input {
+    .chat-input-area input[type="text"] {
         flex: 1;
         padding: 12px 16px;
         background: var(--bg);
@@ -69,8 +98,16 @@
         border-radius: 24px;
         font-size: 0.95rem;
         outline: none;
+        min-width: 200px;
     }
-    .chat-input-area input:focus { border-color: var(--primary); }
+    .chat-input-area input[type="text"]:focus { border-color: var(--primary); }
+    .typing-indicator {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        font-style: italic;
+        padding: 4px 24px 0;
+        min-height: 18px;
+    }
     .status-dot {
         display: inline-block;
         width: 8px; height: 8px;
@@ -94,7 +131,6 @@
     }
     .member-badge .dot.on { background: var(--success); }
     .member-badge .dot.off { background: var(--text-muted); }
-    /* Add-member modal */
     .modal-overlay {
         display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
         background: rgba(0,0,0,0.6); z-index: 100;
@@ -105,8 +141,15 @@
     .search-results { max-height: 250px; overflow-y: auto; margin-top: 12px; }
     .empty-chat {
         flex: 1; display: flex; align-items: center; justify-content: center;
-        color: var(--text-muted); font-size: 0.9rem;
+        color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 0 16px;
     }
+    .lightbox {
+        display: none; position: fixed; inset: 0;
+        background: rgba(0,0,0,0.92); z-index: 200;
+        align-items: center; justify-content: center; cursor: zoom-out;
+    }
+    .lightbox.active { display: flex; }
+    .lightbox img { max-width: 95vw; max-height: 95vh; }
 {% endblock %}
 
 {% block body %}
@@ -127,21 +170,23 @@
         <div style="display:flex; align-items:center; gap:10px;">
             <button class="btn btn-sm btn-outline" id="add-member-btn" style="display:none" onclick="showAddMember()">+ Member</button>
             <span id="ws-status"><span class="status-dot disconnected"></span>Connecting...</span>
-            <span id="debug-info" class="text-sm" style="color:var(--warning);"></span>
         </div>
     </div>
 
     <div class="messages-area" id="messages">
-        <div class="empty-chat" id="empty-chat">No messages yet — say hi!</div>
+        <div class="empty-chat" id="empty-chat">Live session — older messages stay on the senders' devices. Only messages sent while this tab is open will appear here.</div>
     </div>
+
+    <div class="typing-indicator" id="typing-indicator"></div>
 
     <div class="chat-input-area">
         <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
+        <input type="file" id="image-input" accept="image/*" style="display:none" onchange="onImagePicked(event)">
+        <button class="btn btn-outline" onclick="document.getElementById('image-input').click()" title="Send image">📷</button>
         <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
     </div>
 </div>
 
-<!-- Add member modal (group rooms) -->
 <div class="modal-overlay" id="add-member-modal">
     <div class="card modal">
         <h3 style="margin-bottom: 16px;">Add Member</h3>
@@ -154,6 +199,10 @@
         </div>
     </div>
 </div>
+
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+    <img id="lightbox-img" alt="">
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -161,7 +210,13 @@
     const ROOM_ID = '{{ room_id }}';
     let currentToken = localStorage.getItem('access');
     const username = localStorage.getItem('username');
+    let myUserId = null;
     let roomData = null;
+
+    /** In-memory session message store: { id: { sender_id, status, type, is_mine, ... } }. */
+    const sessionMessages = {};
+    /** Typing state: { user_id: { name, expiresAt } } */
+    const typingUsers = {};
 
     if (!currentToken) window.location.href = '/login/';
     document.getElementById('current-user').textContent = username;
@@ -171,7 +226,6 @@
         'Authorization': `Bearer ${currentToken}`,
     });
 
-    // --- Token refresh ---
     async function refreshToken() {
         const refresh = localStorage.getItem('refresh');
         if (!refresh) { logout(); return null; }
@@ -212,12 +266,21 @@
     // LOAD ROOM INFO
     // =========================================================================
 
+    async function loadMe() {
+        try {
+            const res = await apiFetch('/api/users/profile/');
+            if (res.ok) {
+                const me = await res.json();
+                myUserId = me.id;
+            }
+        } catch {}
+    }
+
     async function loadRoom() {
         const res = await apiFetch(`/api/chat/rooms/${ROOM_ID}/`);
         if (!res.ok) { window.location.href = '/dashboard/'; return; }
         roomData = await res.json();
 
-        // Display name: for direct rooms show the other user, for groups show room name
         const members = roomData.members_detail || [];
         const otherMembers = members.filter(m => m.username !== username);
         let displayName;
@@ -228,53 +291,167 @@
         }
         document.getElementById('room-name').textContent = displayName;
 
-        // Member badges
         const badgesHtml = members.map(m =>
-            `<span class="member-badge"><span class="dot ${m.is_online ? 'on' : 'off'}"></span>${m.username}</span>`
+            `<span class="member-badge"><span class="dot ${m.is_online ? 'on' : 'off'}"></span>${escapeHtml(m.username)}</span>`
         ).join('');
         document.getElementById('member-badges').innerHTML = badgesHtml;
 
-        // Show add-member button for group rooms
         if (roomData.room_type === 'group') {
             document.getElementById('add-member-btn').style.display = '';
         }
     }
 
     // =========================================================================
-    // LOAD MESSAGE HISTORY
+    // RENDERING
     // =========================================================================
-
-    async function loadMessages() {
-        const res = await apiFetch(`/api/chat/rooms/${ROOM_ID}/messages/`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const messages = data.results || data;
-        const container = document.getElementById('messages');
-
-        if (messages.length === 0) return;
-        const emptyEl = document.getElementById('empty-chat');
-        if (emptyEl) emptyEl.remove();
-        container.innerHTML = messages.map(m => renderMessage(m.sender_username, m.content, m.created_at)).join('');
-        scrollToBottom();
-    }
-
-    function renderMessage(sender, content, createdAt) {
-        const isMine = sender === username;
-        const time = new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const senderLabel = isMine ? '' : `<div class="message-sender">${escapeHtml(sender)}</div>`;
-        return `
-            <div class="message ${isMine ? 'message-sent' : 'message-received'}">
-                ${senderLabel}
-                <div>${escapeHtml(content)}</div>
-                <div class="message-time">${time}</div>
-            </div>
-        `;
-    }
 
     function escapeHtml(text) {
         const d = document.createElement('div');
-        d.textContent = text;
+        d.textContent = text == null ? '' : String(text);
         return d.innerHTML;
+    }
+
+    function uuid() {
+        if (window.crypto?.randomUUID) return crypto.randomUUID();
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+
+    function tickFor(status) {
+        if (status === 'read') return '<span class="message-ticks" style="color:#7cf;">✓✓</span>';
+        if (status === 'sent') return '<span class="message-ticks">✓</span>';
+        return '<span class="message-ticks">⏳</span>';
+    }
+
+    function renderBubbleBody(msg) {
+        if (msg.is_deleted) {
+            return '<div class="message-deleted">🚫 This message was deleted.</div>';
+        }
+        let reply = '';
+        if (msg.reply_to) {
+            const r = typeof msg.reply_to === 'string' ? safeParse(msg.reply_to) : msg.reply_to;
+            if (r && (r.content || r.sender_name)) {
+                reply = `<div class="reply-quote">
+                    <div class="reply-name">↩ ${escapeHtml(r.sender_name || '')}</div>
+                    <div class="reply-text">${escapeHtml(r.content || '')}</div>
+                </div>`;
+            }
+        }
+        if (msg.message_type === 'image') {
+            if (msg.image_b64) {
+                const mime = msg.image_mime || 'image/jpeg';
+                const dataUrl = `data:${mime};base64,${msg.image_b64}`;
+                return reply + `<img class="message-image" src="${dataUrl}" onclick="openLightbox('${dataUrl}')" alt="">`;
+            }
+            return reply + '<div>📷 Photo (not available on web)</div>';
+        }
+        if (msg.message_type === 'voice') {
+            if (msg.audio_b64) {
+                const mime = msg.audio_mime || 'audio/m4a';
+                const dataUrl = `data:${mime};base64,${msg.audio_b64}`;
+                return reply + `<audio controls src="${dataUrl}"></audio>`;
+            }
+            return reply + '<div>🎤 Voice message (not available on web)</div>';
+        }
+        return reply + `<div>${escapeHtml(msg.content || '')}</div>`;
+    }
+
+    function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+    function renderReactions(reactions) {
+        if (!reactions || typeof reactions !== 'object') return '';
+        const entries = Object.entries(reactions).filter(([, users]) => Array.isArray(users) && users.length > 0);
+        if (entries.length === 0) return '';
+        return `<div class="reactions-row">${entries.map(([emoji, users]) =>
+            `<span class="reaction-badge">${escapeHtml(emoji)} ${users.length}</span>`
+        ).join('')}</div>`;
+    }
+
+    function appendMessage(msg) {
+        const isMine = String(msg.sender_id) === String(myUserId)
+            || (msg.sender && msg.sender === username);
+        const time = new Date(msg.created_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const senderLabel = isMine ? '' : `<div class="message-sender">${escapeHtml(msg.sender || '')}</div>`;
+        const status = sessionMessages[msg.id]?.status || (isMine ? 'pending' : null);
+        const tickHtml = isMine ? tickFor(status) : '';
+
+        const html = `
+            <div class="message ${isMine ? 'message-sent' : 'message-received'}" data-msg-id="${escapeHtml(msg.id)}">
+                ${senderLabel}
+                <div class="message-body">${renderBubbleBody(msg)}</div>
+                ${renderReactions(msg.reactions)}
+                <div class="message-time">${time}${tickHtml}</div>
+            </div>
+        `;
+        const emptyEl = document.getElementById('empty-chat');
+        if (emptyEl) emptyEl.remove();
+        const container = document.getElementById('messages');
+        container.insertAdjacentHTML('beforeend', html);
+        scrollToBottom();
+
+        sessionMessages[msg.id] = {
+            sender_id: msg.sender_id,
+            status: isMine ? (status || 'pending') : 'received',
+            type: msg.message_type,
+            content: msg.content,
+            is_mine: isMine,
+        };
+
+        if (!isMine && document.visibilityState === 'visible') {
+            queueMarkRead(msg.id);
+        }
+    }
+
+    function applyUpdate(messageId, changes) {
+        const el = document.querySelector(`.message[data-msg-id="${cssAttr(messageId)}"]`);
+        if (!el) return;
+        const session = sessionMessages[messageId] || {};
+        if (changes.is_deleted) {
+            session.is_deleted = true;
+            el.querySelector('.message-body').innerHTML = '<div class="message-deleted">🚫 This message was deleted.</div>';
+            const r = el.querySelector('.reactions-row');
+            if (r) r.remove();
+        }
+        if (changes.reactions !== undefined) {
+            session.reactions = changes.reactions;
+            const existing = el.querySelector('.reactions-row');
+            if (existing) existing.remove();
+            const reactionsHtml = renderReactions(changes.reactions);
+            if (reactionsHtml) {
+                const timeEl = el.querySelector('.message-time');
+                timeEl.insertAdjacentHTML('beforebegin', reactionsHtml);
+            }
+        }
+        if (changes.content !== undefined) {
+            session.content = changes.content;
+            const body = el.querySelector('.message-body');
+            if (body) body.innerHTML = renderBubbleBody({ ...session, content: changes.content });
+        }
+        if (changes.is_read && session.is_mine) {
+            promoteStatus(messageId, 'read');
+        }
+        sessionMessages[messageId] = session;
+    }
+
+    function promoteStatus(messageId, status) {
+        const session = sessionMessages[messageId];
+        if (!session || !session.is_mine) return;
+        const order = { pending: 0, sent: 1, read: 2 };
+        if ((order[status] ?? -1) <= (order[session.status] ?? -1)) return;
+        session.status = status;
+        const el = document.querySelector(`.message[data-msg-id="${cssAttr(messageId)}"]`);
+        if (!el) return;
+        const timeEl = el.querySelector('.message-time');
+        if (timeEl) {
+            timeEl.innerHTML = timeEl.innerHTML.replace(/<span class="message-ticks"[^>]*>[^<]+<\/span>/, tickFor(status));
+        }
+    }
+
+    function cssAttr(s) {
+        return String(s).replace(/(['"\\])/g, '\\$1');
     }
 
     function scrollToBottom() {
@@ -283,14 +460,69 @@
     }
 
     // =========================================================================
+    // TYPING
+    // =========================================================================
+
+    function updateTypingIndicator() {
+        const now = Date.now();
+        const active = Object.values(typingUsers).filter(u => u.expiresAt > now);
+        const el = document.getElementById('typing-indicator');
+        if (active.length === 0) { el.textContent = ''; return; }
+        if (active.length === 1) el.textContent = `${active[0].name} is typing…`;
+        else el.textContent = `${active.length} people are typing…`;
+    }
+    setInterval(updateTypingIndicator, 1500);
+
+    let typingSentAt = 0;
+    let typingStopTimer = null;
+    function notifyTyping() {
+        const now = Date.now();
+        if (now - typingSentAt > 3000) {
+            typingSentAt = now;
+            wsSend({ type: 'typing', is_typing: true });
+        }
+        clearTimeout(typingStopTimer);
+        typingStopTimer = setTimeout(() => {
+            typingSentAt = 0;
+            wsSend({ type: 'typing', is_typing: false });
+        }, 4000);
+    }
+
+    // =========================================================================
+    // READ RECEIPTS (batched)
+    // =========================================================================
+
+    const pendingMarkRead = new Set();
+    let markReadTimer = null;
+    function queueMarkRead(messageId) {
+        pendingMarkRead.add(messageId);
+        clearTimeout(markReadTimer);
+        markReadTimer = setTimeout(flushMarkRead, 400);
+    }
+    function flushMarkRead() {
+        if (pendingMarkRead.size === 0) return;
+        const ids = Array.from(pendingMarkRead);
+        pendingMarkRead.clear();
+        wsSend({ type: 'mark_read', message_ids: ids });
+    }
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') flushMarkRead();
+    });
+
+    // =========================================================================
     // WEBSOCKET
     // =========================================================================
 
     let ws;
     let wsReconnectTimer;
+    let pingInterval;
 
-    function getWsToken() {
-        return localStorage.getItem('access');
+    function getWsToken() { return localStorage.getItem('access'); }
+
+    function wsSend(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify(obj)); } catch (err) { console.error('[WS send]', err); }
+        }
     }
 
     function connectWS() {
@@ -301,64 +533,137 @@
         ws.onopen = () => {
             document.getElementById('ws-status').innerHTML =
                 '<span class="status-dot connected"></span>Connected';
+            clearInterval(pingInterval);
+            pingInterval = setInterval(() => wsSend({ type: 'ping' }), 25000);
         };
 
         ws.onmessage = (e) => {
-            try {
-                const msg = JSON.parse(e.data);
-                console.log('[WS] message received:', msg);
-                const emptyEl = document.getElementById('empty-chat');
-                if (emptyEl) emptyEl.remove();
-                const container = document.getElementById('messages');
-                container.insertAdjacentHTML('beforeend', renderMessage(
-                    msg.sender || msg.sender_username,
-                    msg.content || msg.message,
-                    msg.created_at || new Date().toISOString()
-                ));
-                scrollToBottom();
-            } catch (err) {
-                console.error('[WS] render error:', err);
+            let data;
+            try { data = JSON.parse(e.data); } catch { return; }
+            const t = data.type;
+
+            if (t === 'auth_ok' || t === 'pong') return;
+
+            if (t === 'message_server_ack') {
+                promoteStatus(data.message_id, 'sent');
+                return;
+            }
+
+            if (t === 'messages_read') {
+                (data.message_ids || []).forEach(id => promoteStatus(id, 'read'));
+                return;
+            }
+
+            if (t === 'message_update') {
+                (data.updates || []).forEach(u => applyUpdate(u.message_id, u.changes || {}));
+                return;
+            }
+
+            if (t === 'typing') {
+                if (String(data.sender_id) === String(myUserId)) return;
+                typingUsers[data.sender_id] = {
+                    name: data.sender || 'Someone',
+                    expiresAt: data.is_typing ? Date.now() + 5000 : 0,
+                };
+                updateTypingIndicator();
+                return;
+            }
+
+            // Default: chat message frame (no `type` field; sender/sender_id/content present)
+            if (data.id && (data.content !== undefined || data.message_type)) {
+                if (sessionMessages[data.id]?.is_mine) {
+                    promoteStatus(data.id, 'sent');
+                    return;
+                }
+                appendMessage(data);
+                // Best-effort delivery ack for the sender so its outbox PendingDelivery clears.
+                if (data.sender_id) {
+                    wsSend({ type: 'message_ack', message_id: data.id, sender_id: data.sender_id });
+                }
+                return;
             }
         };
 
         ws.onclose = async () => {
+            clearInterval(pingInterval);
             document.getElementById('ws-status').innerHTML =
                 '<span class="status-dot disconnected"></span>Disconnected';
-            // Refresh token then reconnect
             await refreshToken();
             wsReconnectTimer = setTimeout(connectWS, 3000);
         };
 
-        ws.onerror = (err) => { console.error('[WS] error:', err); ws.close(); };
+        ws.onerror = (err) => { console.error('[WS] error:', err); try { ws.close(); } catch {} };
     }
 
     function sendMessage() {
         const input = document.getElementById('msg-input');
         const text = input.value.trim();
-
-        console.log('[SEND] ws state:', ws?.readyState, 'text:', text);
-
         if (!text) return;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            console.warn('[SEND] WebSocket not open, reconnecting...');
-            connectWS();
-            return;
-        }
+        if (!ws || ws.readyState !== WebSocket.OPEN) { connectWS(); return; }
 
-        try {
-            ws.send(JSON.stringify({ message: text, message_type: 'text' }));
-            console.log('[SEND] sent ok');
-        } catch (err) {
-            console.error('[SEND] error:', err);
-        }
+        const id = uuid();
+        const createdAt = new Date().toISOString();
+        wsSend({ id, message: text, message_type: 'text', created_at: createdAt });
+
+        appendMessage({
+            id, sender: username, sender_id: myUserId,
+            content: text, message_type: 'text', created_at: createdAt,
+        });
 
         input.value = '';
         input.focus();
     }
 
-    // Enter key to send
-    document.getElementById('msg-input').addEventListener('keydown', (e) => {
+    async function onImagePicked(event) {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) { connectWS(); return; }
+
+        const b64 = await fileToBase64(file);
+        const id = uuid();
+        const createdAt = new Date().toISOString();
+        const mime = file.type || 'image/jpeg';
+        wsSend({
+            id, message: '📷 Photo', message_type: 'image', created_at: createdAt,
+            image_b64: b64, image_mime: mime,
+        });
+
+        appendMessage({
+            id, sender: username, sender_id: myUserId,
+            content: '📷 Photo', message_type: 'image',
+            image_b64: b64, image_mime: mime,
+            created_at: createdAt,
+        });
+    }
+
+    function fileToBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const result = reader.result || '';
+                const idx = String(result).indexOf(',');
+                resolve(idx >= 0 ? String(result).slice(idx + 1) : String(result));
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+
+    function openLightbox(src) {
+        document.getElementById('lightbox-img').src = src;
+        document.getElementById('lightbox').classList.add('active');
+    }
+    function closeLightbox() {
+        document.getElementById('lightbox').classList.remove('active');
+    }
+
+    const input = document.getElementById('msg-input');
+    input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') sendMessage();
+    });
+    input.addEventListener('input', () => {
+        if (input.value.length > 0) notifyTyping();
     });
 
     // =========================================================================
@@ -385,7 +690,7 @@
                 const already = currentMembers.includes(u.id);
                 return `
                     <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0;">
-                        <span style="font-weight:500;">${u.username}</span>
+                        <span style="font-weight:500;">${escapeHtml(u.username)}</span>
                         <button class="btn btn-sm ${already ? 'btn-outline' : 'btn-success'}"
                             onclick="addMemberToRoom(${u.id})" ${already ? 'disabled' : ''}>
                             ${already ? 'Member' : 'Add'}
@@ -403,16 +708,17 @@
         });
         if (res.ok) {
             closeModal();
-            loadRoom(); // Refresh member list
+            loadRoom();
         }
     }
 
     // =========================================================================
     // INIT
     // =========================================================================
-    document.getElementById('debug-info').textContent = 'v4';
-    loadRoom();
-    loadMessages();
-    connectWS();
+    (async () => {
+        await loadMe();
+        await loadRoom();
+        connectWS();
+    })();
 </script>
 {% endblock %}

@@ -7,6 +7,7 @@ from .auth import AxonicTokenObtainPairView
 
 router = DefaultRouter()
 router.register(r"contacts", views.ContactViewSet, basename="contact")
+router.register(r"blocked", views.BlockedUserViewSet, basename="blocked")
 
 urlpatterns = [
     # Auth

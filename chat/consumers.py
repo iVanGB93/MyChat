@@ -397,10 +397,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # or create a PendingDelivery + push if completely offline.
             room_info = await self.get_room_info()
             in_room_ids = get_connected_chat_user_ids(self.room_id)
+            # Anyone who blocked the sender must never receive this fan-out.
+            blockers = await self.get_blockers_of_sender()
             push_recipients: list[int] = []
 
             for member_id in room_info["member_ids"]:
                 if member_id == self.user.id:
+                    continue
+                if member_id in blockers:
                     continue
                 # A member counts as "already delivered via room group_send" only
                 # if their app is ALSO in the foreground. If they're connected to
@@ -485,7 +489,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         socket and never get a system notification.
         """
         try:
-            if event.get("message", {}).get("sender_id") != self.user.id \
+            sender_id = event.get("message", {}).get("sender_id")
+            # If this user has blocked the sender, drop the frame entirely.
+            if sender_id is not None and sender_id != self.user.id:
+                if await self._is_sender_blocked_by_me(sender_id):
+                    return
+            if sender_id != self.user.id \
                     and not is_user_online(self.user.id):
                 return
             await self.send(text_data=json.dumps(event["message"]))
@@ -614,6 +623,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Return IDs of all room members except the current user."""
         room = ChatRoom.objects.get(id=self.room_id)
         return list(room.members.exclude(id=self.user.id).values_list("id", flat=True))
+
+    @database_sync_to_async
+    def get_blockers_of_sender(self) -> set[int]:
+        """Return the set of user IDs who have blocked the current sender.
+        Messages from `self.user` must NOT fan-out to anyone in this set."""
+        from users.models import BlockedUser
+        return set(
+            BlockedUser.objects.filter(blocked=self.user).values_list("owner_id", flat=True)
+        )
+
+    @database_sync_to_async
+    def _is_sender_blocked_by_me(self, sender_id: int) -> bool:
+        """True when `self.user` has blocked `sender_id`."""
+        from users.models import BlockedUser
+        return BlockedUser.objects.filter(
+            owner=self.user, blocked_id=sender_id,
+        ).exists()
 
 
 class NotificationConsumer(AsyncWebsocketConsumer):

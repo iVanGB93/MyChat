@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Contact
+from .models import BlockedUser, Contact
 
 User = get_user_model()
 
@@ -35,4 +35,13 @@ class ContactSerializer(serializers.ModelSerializer):
     class Meta:
         model = Contact
         fields = ("id", "contact", "contact_detail", "created_at")
+        read_only_fields = ("id", "created_at")
+
+
+class BlockedUserSerializer(serializers.ModelSerializer):
+    blocked_detail = UserSerializer(source="blocked", read_only=True)
+
+    class Meta:
+        model = BlockedUser
+        fields = ("id", "blocked", "blocked_detail", "created_at")
         read_only_fields = ("id", "created_at")

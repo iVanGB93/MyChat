@@ -54,3 +54,24 @@ class Contact(models.Model):
 
     def __str__(self) -> str:
         return f"{self.owner} → {self.contact}"
+
+
+class BlockedUser(models.Model):
+    """A user `owner` has blocked user `blocked` — any messages from
+    `blocked` to `owner` are silently dropped server-side and never
+    fan-out to `owner`'s sockets or push tokens."""
+
+    owner = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="blocked_users"
+    )
+    blocked = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="blocked_by"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("owner", "blocked")
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.owner} ⊘ {self.blocked}"

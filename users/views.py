@@ -5,8 +5,13 @@ from rest_framework import generics, permissions, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Contact
-from .serializers import ContactSerializer, UserRegistrationSerializer, UserSerializer
+from .models import BlockedUser, Contact
+from .serializers import (
+    BlockedUserSerializer,
+    ContactSerializer,
+    UserRegistrationSerializer,
+    UserSerializer,
+)
 
 User = get_user_model()
 
@@ -147,3 +152,48 @@ class ContactViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+
+class BlockedUserViewSet(viewsets.ModelViewSet):
+    """CRUD for the authenticated user's blocked-user list.
+
+    GET     /api/users/blocked/          -> list
+    POST    /api/users/blocked/  {user_id|blocked} -> block someone
+    DELETE  /api/users/blocked/<id>/     -> unblock (id = BlockedUser row id)
+    """
+
+    serializer_class = BlockedUserSerializer
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return BlockedUser.objects.filter(owner=self.request.user).select_related("blocked")
+
+    def create(self, request, *args, **kwargs):
+        # Accept either {"blocked": <id>} or {"user_id": <id>}
+        user_id = request.data.get("blocked") or request.data.get("user_id")
+        if not user_id:
+            return Response(
+                {"error": "blocked (user id) is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            target = User.objects.get(id=user_id)
+        except (User.DoesNotExist, ValueError, TypeError):
+            return Response(
+                {"error": "User not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if target.id == request.user.id:
+            return Response(
+                {"error": "Cannot block yourself"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        obj, _ = BlockedUser.objects.get_or_create(
+            owner=request.user, blocked=target,
+        )
+        # Blocking implies they're not a contact — remove any reverse contact too.
+        Contact.objects.filter(owner=request.user, contact=target).delete()
+        return Response(
+            self.get_serializer(obj).data,
+            status=status.HTTP_201_CREATED,
+        )
