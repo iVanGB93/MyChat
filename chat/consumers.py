@@ -117,11 +117,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def _finish_chat_setup(self):
         """Complete connection setup once self.user is authenticated."""
-        is_member = await self.is_room_member()
+        try:
+            is_member = await self.is_room_member()
+        except Exception:
+            logger.exception("[ChatConsumer] is_room_member failed room=%s", self.room_id)
+            await self.close(code=4500)
+            return
         if not is_member:
             await self.close(code=4003)
             return
-        await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+        try:
+            await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+        except Exception:
+            logger.exception("[ChatConsumer] group_add failed room=%s", self.room_id)
         if not self._accepted:
             await self.accept()
             self._accepted = True
@@ -140,20 +148,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.close(code=4001)
 
     async def disconnect(self, close_code):
-        # Cancel pending auth timeout
-        if hasattr(self, "_auth_timeout_task") and self._auth_timeout_task:
-            self._auth_timeout_task.cancel()
-            self._auth_timeout_task = None
-        if hasattr(self, "room_group_name"):
-            await self.channel_layer.group_discard(
-                self.room_group_name, self.channel_name
-            )
-        # Untrack connected chat user
-        if hasattr(self, "user") and not self.user.is_anonymous:
-            with _connected_lock:
-                room_users = _connected_chat_users.get(self.room_id)
-                if room_users:
-                    room_users.discard(self.user.id)
+        try:
+            # Cancel pending auth timeout
+            if hasattr(self, "_auth_timeout_task") and self._auth_timeout_task:
+                self._auth_timeout_task.cancel()
+                self._auth_timeout_task = None
+            if hasattr(self, "room_group_name"):
+                try:
+                    await self.channel_layer.group_discard(
+                        self.room_group_name, self.channel_name
+                    )
+                except Exception:
+                    logger.exception("[ChatConsumer] group_discard failed")
+            # Untrack connected chat user
+            if hasattr(self, "user") and not self.user.is_anonymous:
+                with _connected_lock:
+                    room_users = _connected_chat_users.get(self.room_id)
+                    if room_users:
+                        room_users.discard(self.user.id)
+        except Exception:
+            logger.exception("[ChatConsumer] disconnect handler failed code=%s", close_code)
 
     async def receive(self, text_data):
         """Handle incoming messages from the WebSocket client."""
@@ -411,25 +425,37 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def chat_message(self, event):
         """Send message to WebSocket client."""
-        await self.send(text_data=json.dumps(event["message"]))
+        try:
+            await self.send(text_data=json.dumps(event["message"]))
+        except Exception:
+            logger.exception("[ChatConsumer.chat_message] failed user=%s room=%s",
+                             getattr(self.user, "id", None), getattr(self, "room_id", None))
 
     async def messages_read(self, event):
         """Broadcast read receipt to WebSocket client."""
-        await self.send(text_data=json.dumps({
-            "type": "messages_read",
-            "reader_id": event["reader_id"],
-            "reader": event["reader"],
-            "message_ids": event["message_ids"],
-        }))
+        try:
+            await self.send(text_data=json.dumps({
+                "type": "messages_read",
+                "reader_id": event["reader_id"],
+                "reader": event["reader"],
+                "message_ids": event["message_ids"],
+            }))
+        except Exception:
+            logger.exception("[ChatConsumer.messages_read] failed user=%s room=%s",
+                             getattr(self.user, "id", None), getattr(self, "room_id", None))
 
     async def message_update_broadcast(self, event):
         """Relay a message_update event to the WebSocket client. Skip the originating sender."""
-        if event.get("sender_id") == self.user.id:
-            return
-        await self.send(text_data=json.dumps({
-            "type": "message_update",
-            "updates": event["updates"],
-        }))
+        try:
+            if event.get("sender_id") == self.user.id:
+                return
+            await self.send(text_data=json.dumps({
+                "type": "message_update",
+                "updates": event["updates"],
+            }))
+        except Exception:
+            logger.exception("[ChatConsumer.message_update_broadcast] failed user=%s room=%s",
+                             getattr(self.user, "id", None), getattr(self, "room_id", None))
 
     # --- Database helpers (run in thread) ---
 
@@ -562,7 +588,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
     async def _finish_notification_setup(self):
         """Complete connection setup once self.user is authenticated."""
         self.group_name = f"notifications_{self.user.id}"
-        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        try:
+            await self.channel_layer.group_add(self.group_name, self.channel_name)
+        except Exception:
+            logger.exception("[NotificationConsumer] group_add failed user=%s", self.user.id)
         if not self._accepted:
             await self.accept()
             self._accepted = True
@@ -577,15 +606,25 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "channels": {self.channel_name},
                     "app_state": "active",
                 }
-        await self._set_user_online(True)
+        try:
+            await self._set_user_online(True)
+        except Exception:
+            logger.exception("[NotificationConsumer] _set_user_online failed user=%s", self.user.id)
 
         # Notify client of any messages waiting for delivery from offline senders
-        pending = await self.get_pending_deliveries()
+        try:
+            pending = await self.get_pending_deliveries()
+        except Exception:
+            logger.exception("[NotificationConsumer] get_pending_deliveries failed user=%s", self.user.id)
+            pending = []
         if pending:
-            await self.send(text_data=json.dumps({
-                "type": "pending_deliveries",
-                "deliveries": pending,
-            }))
+            try:
+                await self.send(text_data=json.dumps({
+                    "type": "pending_deliveries",
+                    "deliveries": pending,
+                }))
+            except Exception:
+                logger.exception("[NotificationConsumer] pending_deliveries send failed")
 
         # If the user has other active sessions, offer peer sync
         with _connected_lock:
@@ -611,28 +650,37 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             await self.close(code=4001)
 
     async def disconnect(self, close_code):
-        # Cancel pending auth timeout
-        if hasattr(self, "_auth_timeout_task") and self._auth_timeout_task:
-            self._auth_timeout_task.cancel()
-            self._auth_timeout_task = None
-        if hasattr(self, "group_name"):
-            await self.channel_layer.group_discard(
-                self.group_name, self.channel_name
-            )
-        # Untrack notification user
-        if hasattr(self, "user") and not self.user.is_anonymous:
-            with _connected_lock:
-                entry = _connected_notification_users.get(self.user.id)
-                if entry:
-                    entry["channels"].discard(self.channel_name)
-                    if not entry["channels"]:
-                        del _connected_notification_users[self.user.id]
-            # Mark user offline in DB when last WS disconnects
-            still_connected = is_user_ws_connected(self.user.id)
-            if not still_connected:
-                await self._set_user_online(False)
-            logger.info("[WS] Notification disconnected: user=%s (still_connected=%s)",
-                        self.user.username, still_connected)
+        try:
+            # Cancel pending auth timeout
+            if hasattr(self, "_auth_timeout_task") and self._auth_timeout_task:
+                self._auth_timeout_task.cancel()
+                self._auth_timeout_task = None
+            if hasattr(self, "group_name"):
+                try:
+                    await self.channel_layer.group_discard(
+                        self.group_name, self.channel_name
+                    )
+                except Exception:
+                    logger.exception("[NotificationConsumer] group_discard failed")
+            # Untrack notification user
+            if hasattr(self, "user") and not self.user.is_anonymous:
+                with _connected_lock:
+                    entry = _connected_notification_users.get(self.user.id)
+                    if entry:
+                        entry["channels"].discard(self.channel_name)
+                        if not entry["channels"]:
+                            del _connected_notification_users[self.user.id]
+                # Mark user offline in DB when last WS disconnects
+                still_connected = is_user_ws_connected(self.user.id)
+                if not still_connected:
+                    try:
+                        await self._set_user_online(False)
+                    except Exception:
+                        logger.exception("[NotificationConsumer] _set_user_online(False) failed")
+                logger.info("[WS] Notification disconnected: user=%s code=%s (still_connected=%s)",
+                            self.user.username, close_code, still_connected)
+        except Exception:
+            logger.exception("[NotificationConsumer] disconnect handler failed code=%s", close_code)
 
     async def receive(self, text_data):
         try:
@@ -790,7 +838,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def notify(self, event):
         """Forward notification payload to client."""
-        await self.send(text_data=json.dumps(event["payload"]))
+        try:
+            await self.send(text_data=json.dumps(event["payload"]))
+        except Exception:
+            logger.exception("[NotificationConsumer.notify] failed user=%s",
+                             getattr(self.user, "id", None))
 
     @database_sync_to_async
     def _set_user_online(self, online: bool):
