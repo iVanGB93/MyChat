@@ -354,7 +354,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 },
             )
 
-            # For members NOT in the room chat WS:
+            # For members NOT actively in the room chat WS (either not connected
+            # to the room, or connected but app is backgrounded):
             # relay via ALL their notification channels (multi-device),
             # or create a PendingDelivery + push if completely offline.
             room_info = await self.get_room_info()
@@ -364,8 +365,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             for member_id in room_info["member_ids"]:
                 if member_id == self.user.id:
                     continue
-                if member_id in in_room_ids:
-                    continue  # already delivered via room group_send above
+                # A member counts as "already delivered via room group_send" only
+                # if their app is ALSO in the foreground. If they're connected to
+                # the room WS but app is backgrounded, we still need to push a
+                # notification — and the per-socket chat_message handler below
+                # suppresses the in-app delivery to that backgrounded socket.
+                if member_id in in_room_ids and is_user_online(member_id):
+                    continue
 
                 member_channels = get_user_notification_channels(member_id)
                 if member_channels:
@@ -424,8 +430,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 pass
 
     async def chat_message(self, event):
-        """Send message to WebSocket client."""
+        """Send message to WebSocket client.
+
+        Suppress delivery when the recipient's app is backgrounded — in that
+        case the sender's `receive` handler also relays this message via the
+        notification WS, which triggers a local push/toast on the client.
+        Without this guard, a user sitting on the chat-room screen with the
+        app in the background would silently receive messages on the room
+        socket and never get a system notification.
+        """
         try:
+            if event.get("message", {}).get("sender_id") != self.user.id \
+                    and not is_user_online(self.user.id):
+                return
             await self.send(text_data=json.dumps(event["message"]))
         except Exception:
             logger.exception("[ChatConsumer.chat_message] failed user=%s room=%s",
