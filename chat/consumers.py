@@ -356,6 +356,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return
 
             # ---- Outgoing message relay (no DB persistence) ----
+            # The server is a dumb relay: forward whatever fields the client
+            # sent, only injecting/overriding the trusted identity fields
+            # (sender, sender_id) and a server-side fallback timestamp.
+            # Apps are responsible for interpreting the payload schema.
             message_content = data.get("message", "")
             message_type_str = data.get("message_type", "text")
             message_id = data.get("id", "")           # client-generated UUID
@@ -364,14 +368,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if not message_content or not message_id:
                 return
 
-            msg_data = {
+            # Pass through every client-supplied field except control keys and
+            # anything we want to authoritatively set ourselves.
+            _RESERVED = {"type", "message", "id", "created_at",
+                         "sender", "sender_id"}
+            msg_data = {k: v for k, v in data.items() if k not in _RESERVED}
+            msg_data.update({
                 "id": message_id,
                 "sender": self.user.username,
                 "sender_id": self.user.id,
                 "content": message_content,
                 "message_type": message_type_str,
                 "created_at": created_at,
-            }
+            })
 
             # Broadcast to all users currently in this room's chat WS
             await self.channel_layer.group_send(
@@ -403,23 +412,31 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
                 member_channels = get_user_notification_channels(member_id)
                 if member_channels:
-                    # Online — relay to ALL notification sessions (multi-device support)
+                    # Online — relay to ALL notification sessions (multi-device support).
+                    # Pass through every field from msg_data so the apps see the
+                    # exact same payload they'd get on the room socket.
+                    notify_payload = {
+                        "event": "new_message",
+                        "room_id": str(self.room_id),
+                        "room_name": room_info["name"],
+                        "sender": self.user.username,
+                        "sender_id": self.user.id,
+                        "content": message_content,
+                        "message_id": message_id,
+                        "message_type": message_type_str,
+                        "created_at": created_at,
+                    }
+                    # Forward any extra client-supplied fields (e.g. reply_to)
+                    # without the consumer having to know about them.
+                    for k, v in msg_data.items():
+                        if k not in notify_payload and k not in ("id", "sender"):
+                            notify_payload[k] = v
                     for channel in member_channels:
                         await self.channel_layer.send(
                             channel,
                             {
                                 "type": "notify",
-                                "payload": {
-                                    "event": "new_message",
-                                    "room_id": str(self.room_id),
-                                    "room_name": room_info["name"],
-                                    "sender": self.user.username,
-                                    "sender_id": self.user.id,
-                                    "content": message_content,
-                                    "message_id": message_id,
-                                    "message_type": message_type_str,
-                                    "created_at": created_at,
-                                },
+                                "payload": notify_payload,
                             },
                         )
                 else:
