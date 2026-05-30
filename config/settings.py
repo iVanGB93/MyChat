@@ -166,12 +166,33 @@ SIMPLE_JWT = {
 # Django Channels — Redis channel layer
 # ---------------------------------------------------------------------------
 
-if os.getenv("REDIS_URL"):
+# Prefer Railway's private Redis URL when available (no proxy, lower latency,
+# fewer dropped connections). Falls back to the public REDIS_URL otherwise.
+_REDIS_URL = (
+    os.getenv("REDIS_PRIVATE_URL")
+    or os.getenv("REDISCLOUD_URL")
+    or os.getenv("REDIS_URL")
+)
+
+if _REDIS_URL:
+    # Use the PubSub backend instead of the default RedisChannelLayer:
+    #   - No BRPOP polling loop, so transient TCP read timeouts don't kill the
+    #     consumer with "Exception inside application: Timeout reading from ...".
+    #   - No DB-1 state to expire / leak.
+    #   - Recommended by django-channels for new deployments.
     CHANNEL_LAYERS = {
         "default": {
-            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
             "CONFIG": {
-                "hosts": [os.getenv("REDIS_URL")],
+                "hosts": [{
+                    "address": _REDIS_URL,
+                    # Keep the TCP socket alive across long idle periods so the
+                    # Railway proxy doesn't silently reap it.
+                    "socket_keepalive": True,
+                    "socket_keepalive_options": {},
+                    "retry_on_timeout": True,
+                    "health_check_interval": 30,
+                }],
             },
         },
     }
