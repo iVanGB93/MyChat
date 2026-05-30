@@ -48,7 +48,7 @@ def monitor_api(request):
     """JSON API for the monitoring dashboard — polled every few seconds."""
     from calls.models import CallLog
     from chat.consumers import get_connected_chat_rooms, get_connected_notification_users
-    from chat.models import ChatRoom, Message
+    from chat.models import ChatRoom
 
     now = timezone.now()
     one_hour_ago = now - timedelta(hours=1)
@@ -77,10 +77,12 @@ def monitor_api(request):
     ws_background = [u for u in ws_notification_users if u.get("app_state") != "active"]
 
     # ── Messages ──
-    total_messages = Message.objects.count()
-    messages_last_hour = Message.objects.filter(created_at__gte=one_hour_ago).count()
-    messages_last_24h = Message.objects.filter(created_at__gte=one_day_ago).count()
-    unread_messages = Message.objects.filter(is_read=False).count()
+    # Messages are no longer persisted server-side (WS-only relay), so
+    # historical counts are not available. Return zeros for dashboard compat.
+    total_messages = 0
+    messages_last_hour = 0
+    messages_last_24h = 0
+    unread_messages = 0
 
     # ── Rooms ──
     total_rooms = ChatRoom.objects.count()
@@ -104,21 +106,8 @@ def monitor_api(request):
     ).count()
 
     # ── Recent activity (last 10 messages) ──
-    recent_messages = list(
-        Message.objects.select_related("sender", "room")
-        .order_by("-created_at")[:10]
-        .values(
-            "id", "sender__username", "room__id", "content",
-            "message_type", "is_read", "created_at",
-        )
-    )
-    for m in recent_messages:
-        m["id"] = str(m["id"])
-        m["room__id"] = str(m["room__id"])
-        m["created_at"] = m["created_at"].isoformat()
-        # Truncate long content
-        if m["content"] and len(m["content"]) > 80:
-            m["content"] = m["content"][:80] + "…"
+    # Messages are not persisted server-side; return empty list.
+    recent_messages: list = []
 
     return JsonResponse({
         "server_time": now.isoformat(),

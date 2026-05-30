@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import ChatRoom, Message
+from .models import ChatRoom
 
 User = get_user_model()
 
@@ -36,31 +36,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "created_at", "updated_at")
 
     def get_last_message(self, obj: ChatRoom) -> dict | None:
-        msg = obj.messages.order_by("-created_at").first()
-        if msg:
-            return {
-                "id": str(msg.id),
-                "sender": msg.sender.username,
-                "content": msg.content,
-                "created_at": msg.created_at.isoformat(),
-            }
+        # Server no longer stores message history — messages are relayed via
+        # the chat WebSocket and persisted client-side only. The client merges
+        # locally-cached previews with this null and shows whatever it has.
         return None
-
-
-class MessageSerializer(serializers.ModelSerializer):
-    sender_username = serializers.CharField(source="sender.username", read_only=True)
-
-    class Meta:
-        model = Message
-        fields = (
-            "id",
-            "room",
-            "sender",
-            "sender_username",
-            "content",
-            "message_type",
-            "file",
-            "is_read",
-            "created_at",
-        )
-        read_only_fields = ("id", "sender", "sender_username", "created_at")

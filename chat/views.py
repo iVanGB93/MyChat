@@ -1,11 +1,10 @@
 from django.contrib.auth import get_user_model
-from django.db.models import Q
-from rest_framework import generics, status, viewsets
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import ChatRoom, Message
-from .serializers import ChatRoomSerializer, MessageSerializer
+from .models import ChatRoom
+from .serializers import ChatRoomSerializer
 
 User = get_user_model()
 
@@ -87,16 +86,3 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
         room.members.add(user)
         serializer = self.get_serializer(room)
         return Response(serializer.data)
-
-
-class MessageListView(generics.ListAPIView):
-    """Paginated message history for a given chat room."""
-
-    serializer_class = MessageSerializer
-
-    def get_queryset(self):
-        room_id = self.kwargs["room_id"]
-        return Message.objects.filter(
-            room_id=room_id,
-            room__members=self.request.user,
-        ).select_related("sender")

@@ -27,32 +27,9 @@ class ChatRoom(models.Model):
         return self.name or str(self.id)
 
 
-class Message(models.Model):
-    """A single message inside a ChatRoom."""
-
-    TEXT = "text"
-    IMAGE = "image"
-    FILE = "file"
-    MESSAGE_TYPES = [(TEXT, "Text"), (IMAGE, "Image"), (FILE, "File")]
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    room = models.ForeignKey(
-        ChatRoom, on_delete=models.CASCADE, related_name="messages"
-    )
-    sender = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="messages"
-    )
-    content = models.TextField(blank=True, default="")
-    message_type = models.CharField(max_length=10, choices=MESSAGE_TYPES, default=TEXT)
-    file = models.FileField(upload_to="chat_files/", blank=True, null=True)
-    is_read = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["created_at"]
-
-    def __str__(self) -> str:
-        return f"{self.sender} in {self.room} @ {self.created_at:%H:%M}"
+# NOTE: The legacy `Message` model has been removed. Messages are relayed
+# in real-time over the chat WebSocket and stored client-side only. The
+# server retains no message history.
 
 
 class PendingDelivery(models.Model):

@@ -11,7 +11,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
-from .models import ChatRoom, Message, PendingDelivery
+from .models import ChatRoom, PendingDelivery
 from .push import send_message_push
 
 User = get_user_model()
@@ -211,15 +211,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     "[ChatConsumer] mark_read from user=%s room=%s ids=%s",
                     self.user.username, self.room_id, len(message_ids),
                 )
-                # Update DB records if they exist (server-stored messages only)
-                result = await self.mark_messages_read(message_ids)
-                logger.info(
-                    "[ChatConsumer] DB updated %d messages as read",
-                    len(result["updated_ids"]),
-                )
-                # Messages sent via WS are NOT stored server-side, so use the
-                # client-provided IDs directly rather than waiting for DB records.
-                broadcast_ids = message_ids if message_ids else result["updated_ids"]
+                # Messages are relayed via WS and never stored server-side, so
+                # we just relay the client-provided IDs as-is.
+                broadcast_ids = message_ids
                 if broadcast_ids:
                     # Broadcast to all users in the room's chat WS
                     await self.channel_layer.group_send(
@@ -302,6 +296,40 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 },
                             },
                         )
+                return
+
+            # ---- typing: ephemeral relay, no DB writes ----
+            # Client sends {"type": "typing", "is_typing": true|false}.
+            # We rebroadcast to everyone in the room group (excluding the sender)
+            # so other open chat clients can show a "… is typing" hint.
+            if msg_type == "typing":
+                is_typing = bool(data.get("is_typing", True))
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "typing_broadcast",
+                        "sender_id": self.user.id,
+                        "sender": self.user.username,
+                        "is_typing": is_typing,
+                    },
+                )
+                # Also relay via notification channels so list rows can show
+                # the indicator even when the recipient hasn't opened the room WS.
+                member_ids = await self.get_room_member_ids_except_self()
+                for member_id in member_ids:
+                    await self.channel_layer.group_send(
+                        f"notifications_{member_id}",
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "typing",
+                                "room_id": str(self.room_id),
+                                "sender_id": self.user.id,
+                                "sender": self.user.username,
+                                "is_typing": is_typing,
+                            },
+                        },
+                    )
                 return
 
             # ---- message_ack: receiver confirmed it stored the message locally ----
@@ -474,6 +502,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
             logger.exception("[ChatConsumer.message_update_broadcast] failed user=%s room=%s",
                              getattr(self.user, "id", None), getattr(self, "room_id", None))
 
+    async def typing_broadcast(self, event):
+        """Relay a typing event to the WebSocket client. Skip the originating sender."""
+        try:
+            if event.get("sender_id") == self.user.id:
+                return
+            await self.send(text_data=json.dumps({
+                "type": "typing",
+                "sender_id": event["sender_id"],
+                "sender": event["sender"],
+                "is_typing": event["is_typing"],
+            }))
+        except Exception:
+            logger.exception("[ChatConsumer.typing_broadcast] failed user=%s room=%s",
+                             getattr(self.user, "id", None), getattr(self, "room_id", None))
+
     # --- Database helpers (run in thread) ---
 
     @database_sync_to_async
@@ -543,26 +586,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def mark_messages_read(self, message_ids: list) -> dict:
+        """DEPRECATED no-op: messages are not stored server-side.
+
+        Retained so existing call sites compile; returns empty results.
         """
-        Mark messages as read. Only marks messages NOT sent by the current user.
-        Returns dict with updated message ID strings and unique sender IDs.
-        """
-        if not message_ids:
-            qs = Message.objects.filter(
-                room_id=self.room_id,
-                is_read=False,
-            ).exclude(sender=self.user)
-        else:
-            qs = Message.objects.filter(
-                id__in=message_ids,
-                room_id=self.room_id,
-                is_read=False,
-            ).exclude(sender=self.user)
-        rows = list(qs.values_list("id", "sender_id"))
-        ids = [str(r[0]) for r in rows]
-        sender_ids = list({r[1] for r in rows})
-        qs.update(is_read=True)
-        return {"updated_ids": ids, "sender_ids": sender_ids}
+        return {"updated_ids": [], "sender_ids": []}
 
     @database_sync_to_async
     def get_room_member_ids_except_self(self) -> list[int]:
