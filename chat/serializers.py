@@ -9,9 +9,11 @@ User = get_user_model()
 class MemberSerializer(serializers.ModelSerializer):
     """Lightweight user serializer for room member lists."""
 
+    avatar = serializers.ImageField(read_only=True, use_url=True)
+
     class Meta:
         model = User
-        fields = ("id", "username", "is_online")
+        fields = ("id", "username", "is_online", "avatar")
 
 
 class ChatRoomSerializer(serializers.ModelSerializer):
