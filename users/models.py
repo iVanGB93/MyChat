@@ -30,6 +30,22 @@ class User(AbstractUser):
         help_text="WebRTC call connection mode preference",
     )
 
+    # ---- Notification preferences (per-user) ----
+    notif_messages_enabled = models.BooleanField(
+        default=True, help_text="Receive push notifications for new messages",
+    )
+    notif_calls_enabled = models.BooleanField(
+        default=True, help_text="Receive push notifications for incoming calls",
+    )
+    notif_sound_enabled = models.BooleanField(
+        default=True, help_text="Play in-app sound for new messages / calls",
+    )
+
+    # ---- Token versioning (used to invalidate all JWTs on demand) ----
+    # Bumping this value invalidates every access/refresh token previously
+    # issued for this user — used by "Logout all devices".
+    token_version = models.PositiveIntegerField(default=0)
+
     class Meta:
         ordering = ["username"]
 

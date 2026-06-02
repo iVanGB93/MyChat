@@ -79,6 +79,7 @@ def send_message_push(
     tokens = list(
         User.objects.filter(
             id__in=recipient_ids,
+            notif_messages_enabled=True,
             expo_push_token__startswith="ExponentPushToken[",
         ).values_list("expo_push_token", flat=True)
     )
@@ -107,6 +108,7 @@ def send_call_push(
     tokens = list(
         User.objects.filter(
             id=callee_id,
+            notif_calls_enabled=True,
             expo_push_token__startswith="ExponentPushToken[",
         ).values_list("expo_push_token", flat=True)
     )

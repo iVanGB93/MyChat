@@ -18,11 +18,20 @@ User = get_user_model()
 
 @database_sync_to_async
 def get_user_from_token(token_str: str):
-    """Validate a JWT access token and return the corresponding user."""
+    """Validate a JWT access token and return the corresponding user.
+
+    Also verifies the token's `tv` (token_version) claim matches the
+    current value on the user record — bumping `token_version` (via
+    "Logout all devices") instantly invalidates every WebSocket token.
+    """
     try:
         token = AccessToken(token_str)
         user_id = token["user_id"]
-        return User.objects.get(id=user_id)
+        user = User.objects.get(id=user_id)
+        token_tv = token.get("tv", 0)
+        if int(token_tv) != int(getattr(user, "token_version", 0)):
+            return AnonymousUser()
+        return user
     except Exception:
         return AnonymousUser()
 

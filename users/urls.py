@@ -16,6 +16,9 @@ urlpatterns = [
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     # Profile
     path("profile/", views.ProfileView.as_view(), name="profile"),
+    path("profile/change-password/", views.PasswordChangeView.as_view(), name="profile-change-password"),
+    path("profile/delete/", views.DeleteAccountView.as_view(), name="profile-delete"),
+    path("profile/logout-all/", views.LogoutAllSessionsView.as_view(), name="profile-logout-all"),
     path("search/", views.UserSearchView.as_view(), name="user-search"),
     # Push notifications
     path("push-token/", views.RegisterPushTokenView.as_view(), name="push-token"),

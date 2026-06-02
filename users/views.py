@@ -2,13 +2,16 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics, permissions, status, viewsets
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import BlockedUser, Contact
 from .serializers import (
+    AccountDeleteSerializer,
     BlockedUserSerializer,
     ContactSerializer,
+    PasswordChangeSerializer,
     UserRegistrationSerializer,
     UserSerializer,
 )
@@ -25,12 +28,83 @@ class RegisterView(generics.CreateAPIView):
 
 
 class ProfileView(generics.RetrieveUpdateAPIView):
-    """Retrieve or update the authenticated user's profile."""
+    """Retrieve or update the authenticated user's profile.
+
+    Accepts both JSON and multipart/form-data — the latter is required
+    for avatar image uploads.
+    """
 
     serializer_class = UserSerializer
+    parser_classes = (JSONParser, MultiPartParser, FormParser)
 
     def get_object(self):
         return self.request.user
+
+
+class PasswordChangeView(APIView):
+    """Change the authenticated user's password.
+
+    POST { "current_password": "...", "new_password": "..." }
+
+    On success bumps `token_version` so all previously issued JWTs
+    (including the one that made the request) are invalidated, and
+    returns a fresh access/refresh pair so the client can stay
+    logged in.
+    """
+
+    def post(self, request):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        serializer = PasswordChangeSerializer(
+            data=request.data, context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        user.set_password(serializer.validated_data["new_password"])
+        user.token_version = (user.token_version or 0) + 1
+        user.save(update_fields=["password", "token_version"])
+
+        # Issue a fresh token pair embedding the new token_version so
+        # the caller can continue using the API immediately.
+        refresh = RefreshToken.for_user(user)
+        refresh["tv"] = user.token_version
+        access = refresh.access_token
+        access["tv"] = user.token_version
+        return Response({
+            "status": "ok",
+            "access": str(access),
+            "refresh": str(refresh),
+        })
+
+
+class LogoutAllSessionsView(APIView):
+    """Invalidate every JWT previously issued for the caller.
+
+    Bumps `token_version`; the next request from this client (still
+    using the old token) will get 401. The mobile app should call
+    this and then clear its local tokens.
+    """
+
+    def post(self, request):
+        user = request.user
+        user.token_version = (user.token_version or 0) + 1
+        user.save(update_fields=["token_version"])
+        return Response({"status": "ok", "token_version": user.token_version})
+
+
+class DeleteAccountView(APIView):
+    """Permanently delete the authenticated user's account.
+
+    DELETE { "password": "..." }
+    """
+
+    def delete(self, request):
+        serializer = AccountDeleteSerializer(
+            data=request.data, context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class RegisterPushTokenView(APIView):
