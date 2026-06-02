@@ -1,6 +1,8 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
+from .db_storage import db_storage
+
 
 class User(AbstractUser):
     """Custom user model with profile fields for the chat app."""
@@ -15,7 +17,9 @@ class User(AbstractUser):
         (CONNECTIVITY_SERVER, 'Always Server (relay)'),
     ]
 
-    avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
+    avatar = models.ImageField(
+        upload_to="avatars/", blank=True, null=True, storage=db_storage,
+    )
     bio = models.CharField(max_length=200, blank=True, default="")
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(auto_now=True)

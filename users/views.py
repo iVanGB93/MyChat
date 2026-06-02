@@ -1,11 +1,14 @@
 from django.contrib.auth import get_user_model
 from django.db.models import Q
+from django.http import Http404, HttpResponse
 from django.utils import timezone
+from django.views.decorators.cache import cache_control
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .db_storage import FileBlob
 from .models import BlockedUser, Contact
 from .serializers import (
     AccountDeleteSerializer,
@@ -17,6 +20,18 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+
+@cache_control(public=True, max_age=86400)
+def serve_blob(request, name: str):
+    """Stream a ``FileBlob`` row to the client (used by ``DatabaseStorage``)."""
+    try:
+        blob = FileBlob.objects.get(pk=name)
+    except FileBlob.DoesNotExist:
+        raise Http404("Not found")
+    response = HttpResponse(bytes(blob.data), content_type=blob.content_type or "application/octet-stream")
+    response["Content-Length"] = str(blob.size or len(blob.data))
+    return response
 
 
 class RegisterView(generics.CreateAPIView):

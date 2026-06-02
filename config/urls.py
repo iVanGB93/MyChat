@@ -9,6 +9,7 @@ from django.http import JsonResponse
 from django.urls import include, path
 
 from . import views
+from users.views import serve_blob
 
 
 def health_check(request):
@@ -18,6 +19,8 @@ def health_check(request):
 urlpatterns = [
     # Health check (for Railway / load balancers)
     path("health/", health_check, name="health"),
+    # DB-backed media (avatars, etc.) — survives ephemeral filesystems.
+    path("media-db/<path:name>", serve_blob, name="media-db"),
     # Web interface (templates)
     path("", views.login_view, name="home"),
     path("login/", views.login_view, name="login"),
