@@ -268,6 +268,16 @@ EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "15"))
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@axonic.app")
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
+# SendGrid Web API \u2014 used on hosts that block outbound SMTP (e.g. Railway).
+# When SENDGRID_API_KEY is set, _send_verification_email uses the HTTPS API
+# instead of SMTP. Local dev without an API key still uses SMTP/console.
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+
+# Resend Web API \u2014 same use case as SendGrid; takes precedence when set.
+# Sign up at https://resend.com, verify your domain or use the shared
+# onboarding@resend.dev sender.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+
 if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
     EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 else:

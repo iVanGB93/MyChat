@@ -75,20 +75,22 @@ def _check_code(code: str, hashed: str) -> bool:
 def _send_verification_email(email: str, code: str) -> None:
     """Send the 6-digit verification email in a background thread.
 
-    SMTP can take several seconds and ASGI/Channels will kill the
-    request task if we block too long. We fire and forget; the
-    frontend shows a "sending" indicator on the verify screen and
-    offers a resend button if delivery is slow or fails.
+    Three delivery paths, chosen by which env var is set (highest
+    priority first):
 
-    The thread also forces IPv4-only DNS resolution because some
-    hosts (e.g. Railway) advertise IPv6 records for mail providers
-    but have no IPv6 route, causing ``OSError: [Errno 101] Network
-    is unreachable``.
+    1. ``RESEND_API_KEY``    \u2014 Resend HTTPS API (port 443).
+    2. ``SENDGRID_API_KEY``  \u2014 SendGrid HTTPS API (port 443).
+    3. SMTP fallback (Django ``send_mail`` with IPv4-only DNS).
+
+    HTTPS APIs are required on hosts that block outbound SMTP
+    (Railway, Fly.io, most modern PaaS providers). The send is
+    fire-and-forget so the ASGI request returns immediately;
+    failures are logged and the user can hit "Resend" on the
+    verify screen.
     """
     import logging
     import threading
     from django.conf import settings
-    from django.core.mail import send_mail
 
     subject = "Your Axonic verification code"
     body = (
@@ -100,8 +102,60 @@ def _send_verification_email(email: str, code: str) -> None:
 
     logger = logging.getLogger(__name__)
 
-    def _do_send() -> None:
+    def _send_via_resend() -> None:
+        import requests
+
+        # https://resend.com/docs/api-reference/emails/send-email
+        payload = {
+            "from": settings.DEFAULT_FROM_EMAIL,
+            "to": [email],
+            "subject": subject,
+            "text": body,
+        }
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=settings.EMAIL_TIMEOUT,
+        )
+        # Resend returns 200 OK with `{ "id": "..." }` on success.
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f"Resend returned {resp.status_code}: {resp.text[:300]}"
+            )
+
+    def _send_via_sendgrid() -> None:
+        import requests
+
+        # https://docs.sendgrid.com/api-reference/mail-send/mail-send
+        payload = {
+            "personalizations": [{"to": [{"email": email}]}],
+            "from": {"email": settings.DEFAULT_FROM_EMAIL},
+            "subject": subject,
+            "content": [{"type": "text/plain", "value": body}],
+        }
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {settings.SENDGRID_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=settings.EMAIL_TIMEOUT,
+        )
+        # SendGrid returns 202 Accepted on success with an empty body.
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f"SendGrid returned {resp.status_code}: {resp.text[:300]}"
+            )
+
+    def _send_via_smtp() -> None:
         import socket as _socket
+        from django.core.mail import send_mail
+
         original_getaddrinfo = _socket.getaddrinfo
 
         def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
@@ -109,20 +163,32 @@ def _send_verification_email(email: str, code: str) -> None:
 
         try:
             _socket.getaddrinfo = _ipv4_only_getaddrinfo
-            try:
-                send_mail(
-                    subject=subject,
-                    message=body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[email],
-                    fail_silently=False,
-                )
-            finally:
-                _socket.getaddrinfo = original_getaddrinfo
+            send_mail(
+                subject=subject,
+                message=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+        finally:
+            _socket.getaddrinfo = original_getaddrinfo
+
+    def _do_send() -> None:
+        if settings.RESEND_API_KEY:
+            transport = "resend"
+            sender = _send_via_resend
+        elif settings.SENDGRID_API_KEY:
+            transport = "sendgrid"
+            sender = _send_via_sendgrid
+        else:
+            transport = "smtp"
+            sender = _send_via_smtp
+        try:
+            sender()
         except Exception:
             logger.exception(
-                "Failed to send verification email to %s (host=%s)",
-                email, settings.EMAIL_HOST,
+                "Failed to send verification email to %s (transport=%s)",
+                email, transport,
             )
 
     threading.Thread(target=_do_send, daemon=True).start()
