@@ -73,17 +73,18 @@ def _check_code(code: str, hashed: str) -> bool:
 
 
 def _send_verification_email(email: str, code: str) -> None:
-    """Send the 6-digit verification email in a daemon thread.
+    """Send the 6-digit verification email synchronously.
 
-    SMTP to GoDaddy can take several seconds (or longer if the server
-    is slow); under ASGI/Channels this blocks the worker and Channels
-    kills the request task. We don't actually need to await the send
-    \u2014 if it fails the user can hit "resend" \u2014 so we fire and forget
-    on a background thread. The thread carries its own short timeout
-    via ``EMAIL_TIMEOUT`` in settings.
+    Raises on failure so the caller can return a real error to the
+    client (and roll back the PendingRegistration row). The send is
+    bounded by ``EMAIL_TIMEOUT`` so it can't hang the request worker.
+
+    We force IPv4-only DNS resolution for the duration of the send.
+    Some hosts (e.g. Railway) advertise IPv6 records for mail
+    providers but have no IPv6 route, which surfaces as
+    ``OSError: [Errno 101] Network is unreachable``.
     """
-    import logging
-    import threading
+    import socket as _socket
     from django.conf import settings
     from django.core.mail import send_mail
 
@@ -95,21 +96,22 @@ def _send_verification_email(email: str, code: str) -> None:
         f"account, you can safely ignore this email.\n"
     )
 
-    logger = logging.getLogger(__name__)
+    original_getaddrinfo = _socket.getaddrinfo
 
-    def _do_send() -> None:
-        try:
-            send_mail(
-                subject=subject,
-                message=body,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
-            )
-        except Exception:
-            logger.exception("Failed to send verification email to %s", email)
+    def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
 
-    threading.Thread(target=_do_send, daemon=True).start()
+    try:
+        _socket.getaddrinfo = _ipv4_only_getaddrinfo
+        send_mail(
+            subject=subject,
+            message=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+    finally:
+        _socket.getaddrinfo = original_getaddrinfo
 
 
 class RegisterRequestView(APIView):
@@ -150,12 +152,16 @@ class RegisterRequestView(APIView):
 
         try:
             _send_verification_email(email, code)
-        except Exception:  # pragma: no cover
-            # _send_verification_email is fire-and-forget so this is
-            # only reached for unexpected synchronous errors.
+        except Exception:
+            # Roll back so the user can retry with the same email
+            # without hitting our duplicate-email guard.
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to send verification email to %s", email,
+            )
             PendingRegistration.objects.filter(email=email).delete()
             return Response(
-                {"detail": "Failed to send verification email. Please try again."},
+                {"detail": "Could not send verification email. Please try again in a moment."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
@@ -213,9 +219,13 @@ class RegisterResendView(APIView):
 
         try:
             _send_verification_email(email, code)
-        except Exception:  # pragma: no cover
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to resend verification email to %s", email,
+            )
             return Response(
-                {"detail": "Failed to send verification email."},
+                {"detail": "Could not send verification email. Please try again in a moment."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
