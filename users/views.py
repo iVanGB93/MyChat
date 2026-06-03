@@ -73,18 +73,20 @@ def _check_code(code: str, hashed: str) -> bool:
 
 
 def _send_verification_email(email: str, code: str) -> None:
-    """Send the 6-digit verification email synchronously.
+    """Send the 6-digit verification email in a background thread.
 
-    Raises on failure so the caller can return a real error to the
-    client (and roll back the PendingRegistration row). The send is
-    bounded by ``EMAIL_TIMEOUT`` so it can't hang the request worker.
+    SMTP can take several seconds and ASGI/Channels will kill the
+    request task if we block too long. We fire and forget; the
+    frontend shows a "sending" indicator on the verify screen and
+    offers a resend button if delivery is slow or fails.
 
-    We force IPv4-only DNS resolution for the duration of the send.
-    Some hosts (e.g. Railway) advertise IPv6 records for mail
-    providers but have no IPv6 route, which surfaces as
-    ``OSError: [Errno 101] Network is unreachable``.
+    The thread also forces IPv4-only DNS resolution because some
+    hosts (e.g. Railway) advertise IPv6 records for mail providers
+    but have no IPv6 route, causing ``OSError: [Errno 101] Network
+    is unreachable``.
     """
-    import socket as _socket
+    import logging
+    import threading
     from django.conf import settings
     from django.core.mail import send_mail
 
@@ -96,22 +98,34 @@ def _send_verification_email(email: str, code: str) -> None:
         f"account, you can safely ignore this email.\n"
     )
 
-    original_getaddrinfo = _socket.getaddrinfo
+    logger = logging.getLogger(__name__)
 
-    def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        return original_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
+    def _do_send() -> None:
+        import socket as _socket
+        original_getaddrinfo = _socket.getaddrinfo
 
-    try:
-        _socket.getaddrinfo = _ipv4_only_getaddrinfo
-        send_mail(
-            subject=subject,
-            message=body,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-    finally:
-        _socket.getaddrinfo = original_getaddrinfo
+        def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            return original_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
+
+        try:
+            _socket.getaddrinfo = _ipv4_only_getaddrinfo
+            try:
+                send_mail(
+                    subject=subject,
+                    message=body,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[email],
+                    fail_silently=False,
+                )
+            finally:
+                _socket.getaddrinfo = original_getaddrinfo
+        except Exception:
+            logger.exception(
+                "Failed to send verification email to %s (host=%s)",
+                email, settings.EMAIL_HOST,
+            )
+
+    threading.Thread(target=_do_send, daemon=True).start()
 
 
 class RegisterRequestView(APIView):
