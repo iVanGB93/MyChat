@@ -73,12 +73,17 @@ def _check_code(code: str, hashed: str) -> bool:
 
 
 def _send_verification_email(email: str, code: str) -> None:
-    """Send the 6-digit verification email.
+    """Send the 6-digit verification email in a daemon thread.
 
-    Falls back to logging silently if SMTP isn't configured — the
-    settings module switches to the console backend in that case so the
-    code shows up in the Django logs without raising.
+    SMTP to GoDaddy can take several seconds (or longer if the server
+    is slow); under ASGI/Channels this blocks the worker and Channels
+    kills the request task. We don't actually need to await the send
+    \u2014 if it fails the user can hit "resend" \u2014 so we fire and forget
+    on a background thread. The thread carries its own short timeout
+    via ``EMAIL_TIMEOUT`` in settings.
     """
+    import logging
+    import threading
     from django.conf import settings
     from django.core.mail import send_mail
 
@@ -89,13 +94,22 @@ def _send_verification_email(email: str, code: str) -> None:
         f"This code expires in 10 minutes. If you did not request an Axonic "
         f"account, you can safely ignore this email.\n"
     )
-    send_mail(
-        subject=subject,
-        message=body,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[email],
-        fail_silently=False,
-    )
+
+    logger = logging.getLogger(__name__)
+
+    def _do_send() -> None:
+        try:
+            send_mail(
+                subject=subject,
+                message=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+        except Exception:
+            logger.exception("Failed to send verification email to %s", email)
+
+    threading.Thread(target=_do_send, daemon=True).start()
 
 
 class RegisterRequestView(APIView):
@@ -136,8 +150,9 @@ class RegisterRequestView(APIView):
 
         try:
             _send_verification_email(email, code)
-        except Exception as exc:  # pragma: no cover
-            # Roll back so the user can request again without hitting "already pending".
+        except Exception:  # pragma: no cover
+            # _send_verification_email is fire-and-forget so this is
+            # only reached for unexpected synchronous errors.
             PendingRegistration.objects.filter(email=email).delete()
             return Response(
                 {"detail": "Failed to send verification email. Please try again."},

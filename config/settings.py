@@ -249,18 +249,21 @@ CELERY_TIMEZONE = "UTC"
 # In dev (DEBUG=True) without EMAIL_HOST_USER configured we fall back to
 # the console backend so verification codes are printed to the Django log.
 #
-# GoDaddy SMTP defaults:
-#   EMAIL_HOST=smtpout.secureserver.net
-#   EMAIL_PORT=465      (SSL)        or 587 (STARTTLS)
-#   EMAIL_USE_SSL=True  (with 465)   EMAIL_USE_TLS=True (with 587)
+# GoDaddy / Microsoft 365 SMTP defaults:
+#   M365 (recommended — GoDaddy now provisions mailboxes on M365):
+#     EMAIL_HOST=smtp.office365.com  EMAIL_PORT=587
+#     EMAIL_USE_SSL=False            EMAIL_USE_TLS=True
+#   Legacy GoDaddy Workspace Email:
+#     EMAIL_HOST=smtpout.secureserver.net  EMAIL_PORT=465
+#     EMAIL_USE_SSL=True                   EMAIL_USE_TLS=False
 # ---------------------------------------------------------------------------
 
-EMAIL_HOST = os.getenv("EMAIL_HOST", "smtpout.secureserver.net")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.office365.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "True").lower() in ("true", "1", "yes")
-EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").lower() in ("true", "1", "yes")
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in ("true", "1", "yes")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in ("true", "1", "yes")
 EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "15"))
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@axonic.app")
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
