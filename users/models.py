@@ -158,3 +158,42 @@ class BlockedUser(models.Model):
 
     def __str__(self) -> str:
         return f"{self.owner} ⊘ {self.blocked}"
+
+
+class PendingRegistration(models.Model):
+    """A registration awaiting email-verification.
+
+    We store the *hashed* password (via Django's password hasher) and the
+    requested profile fields here while the user is in the verify-by-code
+    step. The actual ``User`` row is only created after the code is
+    matched, so unverified emails never pollute the auth table.
+    """
+
+    email = models.EmailField(unique=True)
+    username = models.CharField(max_length=150)
+    password_hash = models.CharField(max_length=255)
+    display_name = models.CharField(max_length=50, blank=True, default="")
+
+    # 6-digit code, stored hashed so the DB dump never reveals live codes.
+    code_hash = models.CharField(max_length=255)
+    expires_at = models.DateTimeField()
+
+    attempts = models.PositiveIntegerField(default=0)
+    resends = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_sent_at = models.DateTimeField(auto_now_add=True)
+
+    MAX_ATTEMPTS = 5
+    MAX_RESENDS = 5
+    RESEND_COOLDOWN_SECONDS = 30
+    TTL_SECONDS = 10 * 60
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"PendingRegistration<{self.email}>"
+
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+        return timezone.now() >= self.expires_at

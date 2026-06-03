@@ -12,6 +12,10 @@ router.register(r"blocked", views.BlockedUserViewSet, basename="blocked")
 urlpatterns = [
     # Auth
     path("register/", views.RegisterView.as_view(), name="register"),
+    # Email-verification registration flow
+    path("register/request/", views.RegisterRequestView.as_view(), name="register-request"),
+    path("register/verify/", views.RegisterVerifyView.as_view(), name="register-verify"),
+    path("register/resend/", views.RegisterResendView.as_view(), name="register-resend"),
     path("token/", AxonicTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     # Profile

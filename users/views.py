@@ -6,16 +6,19 @@ from django.views.decorators.cache import cache_control
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
-from rest_framework.throttling import UserRateThrottle
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from .db_storage import FileBlob
-from .models import BlockedUser, Contact
+from .models import BlockedUser, Contact, PendingRegistration
 from .serializers import (
     AccountDeleteSerializer,
     BlockedUserSerializer,
     ContactSerializer,
     PasswordChangeSerializer,
+    RegistrationRequestSerializer,
+    RegistrationResendSerializer,
+    RegistrationVerifySerializer,
     UserRegistrationSerializer,
     UserSerializer,
 )
@@ -41,6 +44,250 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
     permission_classes = (permissions.AllowAny,)
+
+
+# ---------------------------------------------------------------------------
+# Email-verification registration flow
+# ---------------------------------------------------------------------------
+
+def _make_throttle(scope: str, base=AnonRateThrottle):
+    """Build a one-off DRF throttle class bound to a settings scope."""
+    return type(f"{scope.title().replace('_', '')}Throttle", (base,), {"scope": scope})
+
+
+def _generate_code() -> str:
+    """Six-digit numeric code with leading zeros preserved."""
+    import secrets
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _hash_code(code: str) -> str:
+    """Hash the code with the same hasher used for passwords."""
+    from django.contrib.auth.hashers import make_password
+    return make_password(code)
+
+
+def _check_code(code: str, hashed: str) -> bool:
+    from django.contrib.auth.hashers import check_password
+    return check_password(code, hashed)
+
+
+def _send_verification_email(email: str, code: str) -> None:
+    """Send the 6-digit verification email.
+
+    Falls back to logging silently if SMTP isn't configured — the
+    settings module switches to the console backend in that case so the
+    code shows up in the Django logs without raising.
+    """
+    from django.conf import settings
+    from django.core.mail import send_mail
+
+    subject = "Your Axonic verification code"
+    body = (
+        f"Welcome to Axonic!\n\n"
+        f"Your verification code is: {code}\n\n"
+        f"This code expires in 10 minutes. If you did not request an Axonic "
+        f"account, you can safely ignore this email.\n"
+    )
+    send_mail(
+        subject=subject,
+        message=body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[email],
+        fail_silently=False,
+    )
+
+
+class RegisterRequestView(APIView):
+    """Step 1: validate the account, store a PendingRegistration, send code."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("register_request"),)
+
+    def post(self, request):
+        from django.contrib.auth.hashers import make_password
+        from datetime import timedelta
+
+        serializer = RegistrationRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        email = data["email"]
+        code = _generate_code()
+        now = timezone.now()
+        expires_at = now + timedelta(seconds=PendingRegistration.TTL_SECONDS)
+
+        # Upsert: if a pending row already exists for this email, replace
+        # its code/payload so the user can retry registration with a new
+        # username/password without our DB blocking them.
+        PendingRegistration.objects.update_or_create(
+            email=email,
+            defaults={
+                "username": data["username"],
+                "password_hash": make_password(data["password"]),
+                "display_name": (data.get("display_name") or "").strip(),
+                "code_hash": _hash_code(code),
+                "expires_at": expires_at,
+                "attempts": 0,
+                "resends": 0,
+                "last_sent_at": now,
+            },
+        )
+
+        try:
+            _send_verification_email(email, code)
+        except Exception as exc:  # pragma: no cover
+            # Roll back so the user can request again without hitting "already pending".
+            PendingRegistration.objects.filter(email=email).delete()
+            return Response(
+                {"detail": "Failed to send verification email. Please try again."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {"email": email, "expires_in": PendingRegistration.TTL_SECONDS},
+            status=status.HTTP_200_OK,
+        )
+
+
+class RegisterResendView(APIView):
+    """Step 1.5: regenerate the verification code (cooldown + cap enforced)."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("register_resend"),)
+
+    def post(self, request):
+        from datetime import timedelta
+
+        serializer = RegistrationResendSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        try:
+            pending = PendingRegistration.objects.get(email=email)
+        except PendingRegistration.DoesNotExist:
+            return Response(
+                {"detail": "No pending registration for that email."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        now = timezone.now()
+        cooldown = timedelta(seconds=PendingRegistration.RESEND_COOLDOWN_SECONDS)
+        if now - pending.last_sent_at < cooldown:
+            wait = int((cooldown - (now - pending.last_sent_at)).total_seconds())
+            return Response(
+                {"detail": f"Please wait {wait}s before requesting another code."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        if pending.resends >= PendingRegistration.MAX_RESENDS:
+            return Response(
+                {"detail": "Too many resends. Please start over."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        code = _generate_code()
+        pending.code_hash = _hash_code(code)
+        pending.expires_at = now + timedelta(seconds=PendingRegistration.TTL_SECONDS)
+        pending.attempts = 0
+        pending.resends += 1
+        pending.last_sent_at = now
+        pending.save(update_fields=[
+            "code_hash", "expires_at", "attempts", "resends", "last_sent_at",
+        ])
+
+        try:
+            _send_verification_email(email, code)
+        except Exception:  # pragma: no cover
+            return Response(
+                {"detail": "Failed to send verification email."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {"email": email, "expires_in": PendingRegistration.TTL_SECONDS},
+            status=status.HTTP_200_OK,
+        )
+
+
+class RegisterVerifyView(APIView):
+    """Step 2: check the code, create the User, return a fresh token pair."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("register_verify"),)
+
+    def post(self, request):
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        serializer = RegistrationVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+        code = serializer.validated_data["code"]
+
+        try:
+            pending = PendingRegistration.objects.get(email=email)
+        except PendingRegistration.DoesNotExist:
+            return Response(
+                {"detail": "No pending registration for that email."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if pending.is_expired():
+            pending.delete()
+            return Response(
+                {"detail": "Verification code expired. Please request a new one."},
+                status=status.HTTP_410_GONE,
+            )
+
+        if pending.attempts >= PendingRegistration.MAX_ATTEMPTS:
+            pending.delete()
+            return Response(
+                {"detail": "Too many wrong attempts. Please start over."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        if not _check_code(code, pending.code_hash):
+            pending.attempts += 1
+            pending.save(update_fields=["attempts"])
+            remaining = PendingRegistration.MAX_ATTEMPTS - pending.attempts
+            return Response(
+                {"detail": f"Invalid code. {remaining} attempts remaining."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Re-check uniqueness in case someone else grabbed the username
+        # or email between request and verify.
+        if (
+            User.objects.filter(username__iexact=pending.username).exists()
+            or User.objects.filter(email__iexact=pending.email).exists()
+        ):
+            pending.delete()
+            return Response(
+                {"detail": "Username or email is no longer available."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Create the user with the pre-hashed password (skip set_password).
+        user = User(
+            username=pending.username,
+            email=pending.email,
+            display_name=(pending.display_name or pending.username),
+        )
+        user.password = pending.password_hash
+        user.save()
+
+        pending.delete()
+
+        refresh = RefreshToken.for_user(user)
+        refresh["tv"] = user.token_version
+        access = refresh.access_token
+        access["tv"] = user.token_version
+
+        return Response({
+            "user": UserSerializer(user).data,
+            "access": str(access),
+            "refresh": str(refresh),
+        }, status=status.HTTP_201_CREATED)
 
 
 class ProfileView(generics.RetrieveUpdateAPIView):

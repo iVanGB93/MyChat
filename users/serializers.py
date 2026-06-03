@@ -119,3 +119,63 @@ class BlockedUserSerializer(serializers.ModelSerializer):
         model = BlockedUser
         fields = ("id", "blocked", "blocked_detail", "created_at")
         read_only_fields = ("id", "created_at")
+
+
+# ---------------------------------------------------------------------------
+# Email-verification registration flow
+# ---------------------------------------------------------------------------
+
+
+class RegistrationRequestSerializer(serializers.Serializer):
+    """Step 1: validate the candidate account and queue an email code.
+
+    We deliberately reuse the same uniqueness checks as the legacy
+    ``UserRegistrationSerializer`` so the caller gets the same error
+    shape whether the email is taken or invalid.
+    """
+
+    username = serializers.CharField(max_length=150)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    display_name = serializers.CharField(
+        required=False, allow_blank=True, max_length=50,
+    )
+
+    def validate_username(self, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Username cannot be empty.")
+        if User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError("That username is already taken.")
+        return value
+
+    def validate_email(self, value: str) -> str:
+        value = (value or "").strip().lower()
+        if not value:
+            raise serializers.ValidationError("Email is required.")
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("That email is already in use.")
+        return value
+
+    def validate_password(self, value: str) -> str:
+        validate_password(value)
+        return value
+
+
+class RegistrationVerifySerializer(serializers.Serializer):
+    """Step 2: confirm the 6-digit code and create the account."""
+
+    email = serializers.EmailField()
+    code = serializers.RegexField(regex=r"^\d{6}$")
+
+    def validate_email(self, value: str) -> str:
+        return (value or "").strip().lower()
+
+
+class RegistrationResendSerializer(serializers.Serializer):
+    """Step 1.5: regenerate + re-send the verification code."""
+
+    email = serializers.EmailField()
+
+    def validate_email(self, value: str) -> str:
+        return (value or "").strip().lower()

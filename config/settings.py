@@ -152,6 +152,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": (),
     "DEFAULT_THROTTLE_RATES": {
         "user_search": "30/min",
+        "register_request": "5/hour",
+        "register_resend": "5/hour",
+        "register_verify": "10/hour",
     },
 }
 
@@ -237,6 +240,36 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
+
+
+# ---------------------------------------------------------------------------
+# Email (SMTP) — used by the email-verification registration flow
+# ---------------------------------------------------------------------------
+# In production set EMAIL_HOST / EMAIL_HOST_USER / EMAIL_HOST_PASSWORD via env.
+# In dev (DEBUG=True) without EMAIL_HOST_USER configured we fall back to
+# the console backend so verification codes are printed to the Django log.
+#
+# GoDaddy SMTP defaults:
+#   EMAIL_HOST=smtpout.secureserver.net
+#   EMAIL_PORT=465      (SSL)        or 587 (STARTTLS)
+#   EMAIL_USE_SSL=True  (with 465)   EMAIL_USE_TLS=True (with 587)
+# ---------------------------------------------------------------------------
+
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtpout.secureserver.net")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "True").lower() in ("true", "1", "yes")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").lower() in ("true", "1", "yes")
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "15"))
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@axonic.app")
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+
+if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+else:
+    # No credentials configured — print emails to the log instead of failing.
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 
 # ---------------------------------------------------------------------------
