@@ -4,6 +4,19 @@ from django.db import models
 from .db_storage import db_storage
 
 
+def _generate_user_tag() -> str:
+    """Generate a short, unambiguous user tag like 'AXN-7K3P'.
+
+    The character set excludes 0/O/1/I to avoid visual ambiguity when
+    users read the tag aloud or type it from a screen. Uniqueness is
+    enforced at the column level; the caller retries on IntegrityError.
+    """
+    import secrets
+
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "AXN-" + "".join(secrets.choice(alphabet) for _ in range(4))
+
+
 class User(AbstractUser):
     """Custom user model with profile fields for the chat app."""
 
@@ -34,6 +47,30 @@ class User(AbstractUser):
         help_text="WebRTC call connection mode preference",
     )
 
+    # ---- Identity / discovery ----
+    # `username` remains the unique login id. `display_name` is the free-form
+    # human-friendly label shown in the UI (not unique). `user_tag` is a short
+    # auto-generated handle that lets users share an unambiguous reference
+    # (e.g. "AXN-7K3P") without exposing username/email.
+    display_name = models.CharField(
+        max_length=50, blank=True, default="",
+        help_text="Free-form display name shown in the UI. Defaults to username.",
+    )
+    user_tag = models.CharField(
+        max_length=16, unique=True, db_index=True, blank=True, null=True,
+        help_text="Short shareable handle, e.g. 'AXN-7K3P'.",
+    )
+
+    # ---- Discoverability preferences ----
+    discoverable_by_username = models.BooleanField(
+        default=True,
+        help_text="Allow other users to find this account by username search.",
+    )
+    discoverable_by_email = models.BooleanField(
+        default=False,
+        help_text="Allow other users to find this account by exact email match.",
+    )
+
     # ---- Notification preferences (per-user) ----
     notif_messages_enabled = models.BooleanField(
         default=True, help_text="Receive push notifications for new messages",
@@ -55,6 +92,32 @@ class User(AbstractUser):
 
     def __str__(self) -> str:
         return self.username
+
+    def save(self, *args, **kwargs):
+        """Auto-assign `user_tag` on first save with bounded retries.
+
+        Retries are needed because the column is UNIQUE and `secrets`
+        randomness can collide once the user base grows. With the 32-char
+        alphabet × 4 positions there are ~1M tags, so a small handful of
+        retries is more than enough until much later.
+        """
+        from django.db import IntegrityError, transaction
+
+        if self.user_tag:
+            return super().save(*args, **kwargs)
+
+        last_err = None
+        for _ in range(6):
+            self.user_tag = _generate_user_tag()
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError as exc:
+                last_err = exc
+                self.user_tag = None
+                continue
+        # Surface the original error if we somehow exhausted retries.
+        raise last_err  # pragma: no cover
 
 
 class Contact(models.Model):

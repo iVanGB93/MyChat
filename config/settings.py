@@ -146,6 +146,13 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 50,
+    # Named throttles consumed by individual views (e.g. UserSearchView).
+    # Defaults are intentionally conservative; tune per-environment via env
+    # if abuse is observed.
+    "DEFAULT_THROTTLE_CLASSES": (),
+    "DEFAULT_THROTTLE_RATES": {
+        "user_search": "30/min",
+    },
 }
 
 

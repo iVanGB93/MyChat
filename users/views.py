@@ -6,6 +6,7 @@ from django.views.decorators.cache import cache_control
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from .db_storage import FileBlob
@@ -218,17 +219,50 @@ class PendingNotificationsView(APIView):
 
 
 class UserSearchView(generics.ListAPIView):
-    """Search users by username (for adding contacts)."""
+    """Search users when adding contacts.
+
+    A search matches a target user when ANY of the following hold:
+
+    - The query is the **exact** `user_tag` (case-insensitive). The tag
+      is a deliberately-shared handle, so tag lookup ignores the target's
+      privacy flags.
+    - The query is the **exact** email of a user who has opted in to
+      `discoverable_by_email`.
+    - The query partially matches `username` or `display_name` and the
+      target has `discoverable_by_username = True` (default).
+
+    The caller's own account is always excluded from results.
+    """
 
     serializer_class = UserSerializer
+    throttle_classes = (type("UserSearchThrottle", (UserRateThrottle,), {"scope": "user_search"}),)
 
     def get_queryset(self):
-        query = self.request.query_params.get("q", "")
-        if query:
-            return User.objects.filter(username__icontains=query).exclude(
-                id=self.request.user.id
-            )[:20]
-        return User.objects.none()
+        raw = (self.request.query_params.get("q") or "").strip()
+        if not raw:
+            return User.objects.none()
+
+        me = self.request.user
+        # Normalize the user_tag lookup: accept "axn-7k3p", "AXN7K3P", etc.
+        normalized = raw.replace(" ", "").upper()
+        if not normalized.startswith("AXN-") and len(normalized) >= 4:
+            tag_guess = "AXN-" + normalized[-4:] if len(normalized) == 7 else normalized
+        else:
+            tag_guess = normalized
+
+        tag_match = Q(user_tag__iexact=tag_guess)
+        email_match = Q(email__iexact=raw, discoverable_by_email=True)
+        # Username / display_name partial search is gated on the target's
+        # username discoverability preference.
+        text_match = (
+            Q(username__icontains=raw) | Q(display_name__icontains=raw)
+        ) & Q(discoverable_by_username=True)
+
+        return (
+            User.objects.filter(tag_match | email_match | text_match)
+            .exclude(id=me.id)
+            .distinct()[:20]
+        )
 
 
 class ContactViewSet(viewsets.ModelViewSet):

@@ -13,7 +13,7 @@ class MemberSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ("id", "username", "is_online", "avatar")
+        fields = ("id", "username", "display_name", "user_tag", "is_online", "avatar")
 
 
 class ChatRoomSerializer(serializers.ModelSerializer):

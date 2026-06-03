@@ -9,17 +9,25 @@ User = get_user_model()
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
+    display_name = serializers.CharField(
+        required=False, allow_blank=True, max_length=50,
+    )
 
     class Meta:
         model = User
-        fields = ("id", "username", "email", "password")
+        fields = ("id", "username", "email", "password", "display_name", "user_tag")
+        read_only_fields = ("id", "user_tag")
 
     def create(self, validated_data: dict) -> User:
+        display_name = (validated_data.get("display_name") or "").strip()
         user = User.objects.create_user(
             username=validated_data["username"],
             email=validated_data.get("email", ""),
             password=validated_data["password"],
         )
+        # Default display_name to username when the caller didn't supply one.
+        user.display_name = display_name or user.username
+        user.save(update_fields=["display_name"])
         return user
 
 
@@ -28,10 +36,12 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             "id", "username", "email", "avatar", "bio",
+            "display_name", "user_tag",
+            "discoverable_by_username", "discoverable_by_email",
             "is_online", "last_seen", "connectivity_mode",
             "notif_messages_enabled", "notif_calls_enabled", "notif_sound_enabled",
         )
-        read_only_fields = ("id", "is_online", "last_seen")
+        read_only_fields = ("id", "is_online", "last_seen", "user_tag")
 
     # ---- Uniqueness checks (case-insensitive) for self-edits ----
     def validate_username(self, value: str) -> str:
@@ -55,6 +65,12 @@ class UserSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError("That email is already in use.")
         return value
+
+    def validate_display_name(self, value: str) -> str:
+        # Display name is free-form but trimmed and length-bounded by the
+        # column. Empty string is allowed; when empty we fall back to the
+        # username at read time on the client.
+        return (value or "").strip()
 
 
 class PasswordChangeSerializer(serializers.Serializer):
