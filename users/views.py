@@ -544,6 +544,7 @@ class PendingNotificationsView(APIView):
                 "room_id": str(pd.room_id),
                 "room_name": display_name,
                 "sender": pd.from_user.username,
+                "sender_id": pd.from_user_id,
                 # Content not stored server-side; client already got the actual
                 # content via Expo push at send-time.
                 "content": "New messages waiting",
