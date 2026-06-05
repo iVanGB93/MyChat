@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Join on Axonic</title>
+  <style>
+    :root {
+      --bg: #060914;
+      --panel: #0e1426;
+      --text: #e9eefb;
+      --muted: #9ca9c7;
+      --accent: #00e5ff;
+      --accent2: #5b21b6;
+      --border: rgba(0, 229, 255, 0.35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(50rem 50rem at -15% -10%, rgba(0, 229, 255, 0.16), transparent 60%),
+        radial-gradient(45rem 45rem at 110% 120%, rgba(91, 33, 182, 0.22), transparent 60%),
+        var(--bg);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 460px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00)), var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    }
+    .kicker {
+      color: var(--accent);
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+      margin: 0 0 8px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.15;
+      letter-spacing: 0.01em;
+    }
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .tag {
+      margin: 16px 0;
+      border: 1px solid rgba(0, 229, 255, 0.45);
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      background: rgba(0, 229, 255, 0.06);
+    }
+    .tag-label {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+    .tag-value {
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      font-size: 18px;
+    }
+    .actions {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .btn {
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      text-decoration: none;
+      border-radius: 12px;
+      padding: 13px 16px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      border: 1px solid transparent;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #4df2ff);
+      color: #031017;
+    }
+    .btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border-color: rgba(255,255,255,0.2);
+    }
+    .foot {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <p class="kicker">AXONIC INVITE</p>
+    <h1>Add contact on Axonic</h1>
+    <p>Open this invite in the app to add the contact instantly.</p>
+
+    <div class="tag">
+      <div>
+        <div class="tag-label">USER TAG</div>
+        <div class="tag-value">{{ user_tag }}</div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <a class="btn btn-primary" href="{{ deep_link }}">Open in Axonic</a>
+      <a class="btn btn-secondary" href="/register/">Create account</a>
+    </div>
+
+    <p class="foot">If the app does not open, copy the tag and add it from Contacts in Axonic.</p>
+  </main>
+</body>
+</html>

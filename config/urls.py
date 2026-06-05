@@ -25,6 +25,7 @@ urlpatterns = [
     path("", views.login_view, name="home"),
     path("login/", views.login_view, name="login"),
     path("register/", views.register_view, name="register"),
+    path("add/<str:user_tag>/", views.invite_tag_view, name="invite-tag"),
     path("dashboard/", views.dashboard_view, name="dashboard"),
     path("chat/<uuid:room_id>/", views.chat_room_view, name="chat-room"),
     path("calls/", views.calls_view, name="calls"),

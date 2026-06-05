@@ -4,8 +4,10 @@ These serve HTML pages that interact with the REST API via JavaScript.
 """
 
 from datetime import timedelta
+from urllib.parse import quote
 
 from django.contrib.auth import get_user_model
+from django.contrib.admin.views.decorators import staff_member_required
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -35,15 +37,35 @@ def calls_view(request):
     return render(request, "app.html")
 
 
+def invite_tag_view(request, user_tag: str):
+    """Landing page for shared invite links like /add/AXN-1234.
+
+    The page provides a deep-link button (axonic://...) and keeps the tag visible
+    so users can copy it manually if the app is not installed.
+    """
+    normalized_tag = (user_tag or "").strip().upper()
+    deep_link = f"axonic://add/{quote(normalized_tag)}"
+    return render(
+        request,
+        "invite.html",
+        {
+            "user_tag": normalized_tag,
+            "deep_link": deep_link,
+        },
+    )
+
+
 # ──────────────────────────────────────────────────────────
 #  Real-time monitoring
 # ──────────────────────────────────────────────────────────
 
+@staff_member_required
 def monitor_view(request):
     """Render the monitoring dashboard page."""
     return render(request, "monitor.html")
 
 
+@staff_member_required
 def monitor_api(request):
     """JSON API for the monitoring dashboard — polled every few seconds."""
     from calls.models import CallLog
