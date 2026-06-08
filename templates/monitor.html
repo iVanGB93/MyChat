@@ -239,6 +239,71 @@
     <div class="empty" id="callsEmpty" style="display:none;">No active calls</div>
   </div>
 
+  <!-- Reliability KPIs -->
+  <div class="section">
+    <div class="section-title">
+      Reliability (Trust Layer)
+      <span class="badge" id="reliabilityBadge" style="background:var(--accent);">Live</span>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card" id="cardMsgAckRate24h">
+        <div class="value" id="msgAckRate24h">0%</div>
+        <div class="label">Msg Ack Rate (24h)</div>
+      </div>
+      <div class="stat-card" id="cardMsgAckAvgMs">
+        <div class="value" id="msgAckAvgMs">-</div>
+        <div class="label">Msg Ack Avg (ms)</div>
+      </div>
+      <div class="stat-card" id="cardMsgPendingOverdue">
+        <div class="value" id="msgPendingOverdue">0</div>
+        <div class="label">Msg Pending Overdue</div>
+      </div>
+      <div class="stat-card" id="cardMsgPushFallback24h">
+        <div class="value" id="msgPushFallback24h">0</div>
+        <div class="label">Msg Push Fallback (24h)</div>
+      </div>
+      <div class="stat-card" id="cardCallAckRate24h">
+        <div class="value" id="callAckRate24h">0%</div>
+        <div class="label">Call Invite Ack Rate (24h)</div>
+      </div>
+      <div class="stat-card" id="cardCallAckPendingOverdue">
+        <div class="value" id="callAckPendingOverdue">0</div>
+        <div class="label">Call Ack Pending Overdue</div>
+      </div>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Messages</th>
+          <th>Calls</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Ack timeout (seconds)</td>
+          <td id="msgAckTimeout">-</td>
+          <td id="callAckTimeout">-</td>
+        </tr>
+        <tr>
+          <td>Created/Started (24h)</td>
+          <td id="msgCreated24h">0</td>
+          <td id="callsStarted24h">0</td>
+        </tr>
+        <tr>
+          <td>Delivered/Acked (24h)</td>
+          <td id="msgDelivered24h">0</td>
+          <td id="callsInviteAcked24h">0</td>
+        </tr>
+        <tr>
+          <td>Push sent (24h)</td>
+          <td id="msgPushSent24h">0</td>
+          <td id="callsPushSent24h">0</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
   <!-- Active Chat Rooms (WS) -->
   <div class="section">
     <div class="section-title">
@@ -330,6 +395,31 @@ function setVal(id, v) {
   if (el) el.textContent = v;
 }
 
+function setCardTone(id, tone) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('success', 'warning', 'danger', 'accent');
+  if (tone) el.classList.add(tone);
+}
+
+function setReliabilityBadge(level, label) {
+  const el = document.getElementById('reliabilityBadge');
+  if (!el) return;
+  const colorByLevel = {
+    healthy: 'var(--success)',
+    degraded: 'var(--warning)',
+    critical: 'var(--danger)',
+  };
+  el.style.background = colorByLevel[level] || 'var(--accent)';
+  el.style.color = level === 'degraded' ? '#000' : '#fff';
+  el.textContent = label;
+}
+
+function percent(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '0%';
+  return (Number(v) * 100).toFixed(1) + '%';
+}
+
 function renderTable(bodyId, emptyId, rows, renderRow) {
   const body = document.getElementById(bodyId);
   const empty = document.getElementById(emptyId);
@@ -401,13 +491,89 @@ async function refresh() {
     // Active calls table
     renderTable('callsBody', 'callsEmpty', d.calls.active, c =>
       `<tr>
-        <td>${statusDot(c.status === 'RINGING' ? 'yellow' : 'green')}</td>
+        <td>${statusDot(c.status === 'ringing' ? 'yellow' : 'green')}</td>
         <td>${c.caller__username}</td>
         <td>${c.callee__username}</td>
         <td>${c.status}</td>
         <td>${timeAgo(c.started_at)}</td>
       </tr>`
     );
+
+    // Reliability metrics
+    const rel = d.reliability || {};
+    const relMsg = rel.messages || {};
+    const relCall = rel.calls || {};
+    const t = rel.thresholds || {};
+
+    setVal('msgAckRate24h', percent(relMsg.ack_rate_24h));
+    setVal('msgAckAvgMs', relMsg.ack_latency_avg_ms_24h == null ? '-' : String(relMsg.ack_latency_avg_ms_24h));
+    setVal('msgPendingOverdue', relMsg.pending_overdue ?? 0);
+    setVal('msgPushFallback24h', relMsg.push_fallback_24h ?? 0);
+    setVal('callAckRate24h', percent(relCall.invite_ack_rate_24h));
+    setVal('callAckPendingOverdue', relCall.ack_pending_overdue ?? 0);
+
+    setVal('msgAckTimeout', rel.message_ack_timeout_seconds ?? '-');
+    setVal('callAckTimeout', relCall.ack_timeout_seconds ?? '-');
+    setVal('msgCreated24h', relMsg.created_24h ?? 0);
+    setVal('callsStarted24h', relCall.started_24h ?? 0);
+    setVal('msgDelivered24h', relMsg.delivered_24h ?? 0);
+    setVal('callsInviteAcked24h', relCall.invite_acked_24h ?? 0);
+    setVal('msgPushSent24h', relMsg.push_fallback_24h ?? 0);
+    setVal('callsPushSent24h', relCall.push_sent_24h ?? 0);
+
+    const msgAckRate = Number(relMsg.ack_rate_24h ?? 0);
+    const callAckRate = Number(relCall.invite_ack_rate_24h ?? 0);
+    const msgOverdue = Number(relMsg.pending_overdue ?? 0);
+    const callOverdue = Number(relCall.ack_pending_overdue ?? 0);
+    const msgFallback = Number(relMsg.push_fallback_24h ?? 0);
+    const msgAckAvg = relMsg.ack_latency_avg_ms_24h == null ? null : Number(relMsg.ack_latency_avg_ms_24h);
+
+    const msgAckHealthy = Number(t.msg_ack_rate_healthy ?? 0.99);
+    const msgAckDegraded = Number(t.msg_ack_rate_degraded ?? 0.95);
+    const callAckHealthy = Number(t.call_ack_rate_healthy ?? 0.98);
+    const callAckDegraded = Number(t.call_ack_rate_degraded ?? 0.90);
+    const msgOverdueWarn = Number(t.msg_pending_overdue_warn ?? 1);
+    const msgOverdueCrit = Number(t.msg_pending_overdue_crit ?? 10);
+    const callOverdueWarn = Number(t.call_pending_overdue_warn ?? 1);
+    const callOverdueCrit = Number(t.call_pending_overdue_crit ?? 5);
+    const msgFallbackWarn = Number(t.msg_push_fallback_warn ?? 1);
+    const msgFallbackCrit = Number(t.msg_push_fallback_crit ?? 20);
+    const msgAckAvgHealthy = Number(t.msg_ack_avg_ms_healthy ?? 1200);
+    const msgAckAvgDegraded = Number(t.msg_ack_avg_ms_degraded ?? 3500);
+
+    setCardTone('cardMsgAckRate24h', msgAckRate >= msgAckHealthy ? 'success' : (msgAckRate >= msgAckDegraded ? 'warning' : 'danger'));
+    setCardTone('cardCallAckRate24h', callAckRate >= callAckHealthy ? 'success' : (callAckRate >= callAckDegraded ? 'warning' : 'danger'));
+    setCardTone('cardMsgPendingOverdue', msgOverdue < msgOverdueWarn ? 'success' : (msgOverdue <= msgOverdueCrit ? 'warning' : 'danger'));
+    setCardTone('cardCallAckPendingOverdue', callOverdue < callOverdueWarn ? 'success' : (callOverdue <= callOverdueCrit ? 'warning' : 'danger'));
+    setCardTone('cardMsgPushFallback24h', msgFallback < msgFallbackWarn ? 'success' : (msgFallback <= msgFallbackCrit ? 'warning' : 'danger'));
+    if (msgAckAvg == null) {
+      setCardTone('cardMsgAckAvgMs', 'accent');
+    } else {
+      setCardTone('cardMsgAckAvgMs', msgAckAvg <= msgAckAvgHealthy ? 'success' : (msgAckAvg <= msgAckAvgDegraded ? 'warning' : 'danger'));
+    }
+
+    const severe =
+      msgAckRate < msgAckDegraded ||
+      callAckRate < callAckDegraded ||
+      msgOverdue > msgOverdueCrit ||
+      callOverdue > callOverdueCrit ||
+      msgFallback > msgFallbackCrit ||
+      (msgAckAvg != null && msgAckAvg > msgAckAvgDegraded);
+    const warning = !severe && (
+      msgAckRate < msgAckHealthy ||
+      callAckRate < callAckHealthy ||
+      msgOverdue >= msgOverdueWarn ||
+      callOverdue >= callOverdueWarn ||
+      msgFallback >= msgFallbackWarn ||
+      (msgAckAvg != null && msgAckAvg > msgAckAvgHealthy)
+    );
+    if (severe) {
+      setReliabilityBadge('critical', 'Critical');
+    } else if (warning) {
+      setReliabilityBadge('degraded', 'Degraded');
+    } else {
+      setReliabilityBadge('healthy', 'Healthy');
+    }
 
     // Active chat rooms
     const chatRoomRows = Object.entries(d.websockets.chat_rooms).map(

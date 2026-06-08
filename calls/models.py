@@ -37,6 +37,9 @@ class CallLog(models.Model):
     status = models.CharField(max_length=12, choices=STATUSES, default=INITIATED)
     room_name = models.CharField(max_length=255, blank=True, default="")
     started_at = models.DateTimeField(auto_now_add=True)
+    ws_notified_at = models.DateTimeField(blank=True, null=True)
+    push_sent_at = models.DateTimeField(blank=True, null=True)
+    invite_acked_at = models.DateTimeField(blank=True, null=True)
     ended_at = models.DateTimeField(blank=True, null=True)
     duration_seconds = models.PositiveIntegerField(default=0)
 

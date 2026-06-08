@@ -27,13 +27,13 @@ def _send_expo_push(
     channel_id: str = "messages",
     priority: str = "high",
     sound: str = "default",
-) -> None:
+) -> bool:
     """
     Send a push notification to one or more Expo push tokens.
     Silently fails on errors (fire-and-forget for real-time notifications).
     """
     if not push_tokens:
-        return
+        return False
 
     messages = []
     for token in push_tokens:
@@ -50,7 +50,7 @@ def _send_expo_push(
         })
 
     if not messages:
-        return
+        return False
 
     try:
         resp = requests.post(
@@ -64,8 +64,10 @@ def _send_expo_push(
         )
         resp.raise_for_status()
         logger.info("[ExpoPush] sent %d notification(s), status=%d", len(messages), resp.status_code)
+        return True
     except Exception as exc:
         logger.warning("[ExpoPush] failed to send: %s", exc)
+        return False
 
 
 def send_message_push(
@@ -74,7 +76,7 @@ def send_message_push(
     content: str,
     room_id: str,
     room_name: str,
-) -> None:
+) -> bool:
     """Send a push notification for a new chat message."""
     tokens = list(
         User.objects.filter(
@@ -83,7 +85,7 @@ def send_message_push(
             expo_push_token__startswith="ExponentPushToken[",
         ).values_list("expo_push_token", flat=True)
     )
-    _send_expo_push(
+    return _send_expo_push(
         push_tokens=tokens,
         title=sender_name,
         body=content[:200],
@@ -103,7 +105,7 @@ def send_call_push(
     call_id: str,
     caller_id: int,
     room_name: str,
-) -> None:
+) -> bool:
     """Send a push notification for an incoming call."""
     tokens = list(
         User.objects.filter(
@@ -113,7 +115,7 @@ def send_call_push(
         ).values_list("expo_push_token", flat=True)
     )
     icon = "📹" if call_type == "video" else "📞"
-    _send_expo_push(
+    return _send_expo_push(
         push_tokens=tokens,
         title=f"{icon} Incoming {call_type} call",
         body=f"{caller_name} is calling you",

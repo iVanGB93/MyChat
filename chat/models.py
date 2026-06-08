@@ -59,3 +59,53 @@ class PendingDelivery(models.Model):
 
     def __str__(self) -> str:
         return f"{self.from_user} → {self.to_user} in {self.room}"
+
+
+class MessageDelivery(models.Model):
+    """Per-message delivery state (metadata only, no message content)."""
+
+    STATUS_PENDING = "pending"
+    STATUS_DELIVERED = "delivered"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_DELIVERED, "Delivered"),
+    ]
+
+    room = models.ForeignKey(
+        ChatRoom, on_delete=models.CASCADE, related_name="message_deliveries"
+    )
+    message_id = models.CharField(max_length=64)
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="message_delivery_outbox",
+    )
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="message_delivery_inbox",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    push_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["message_id", "recipient"],
+                name="uniq_message_delivery_per_recipient",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["recipient", "status"]),
+            models.Index(fields=["sender", "recipient", "room"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.message_id} {self.sender_id}->{self.recipient_id} ({self.status})"

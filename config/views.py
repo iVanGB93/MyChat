@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from django.contrib.auth import get_user_model
 from django.contrib.admin.views.decorators import staff_member_required
+from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -70,7 +71,7 @@ def monitor_api(request):
     """JSON API for the monitoring dashboard — polled every few seconds."""
     from calls.models import CallLog
     from chat.consumers import get_connected_chat_rooms, get_connected_notification_users
-    from chat.models import ChatRoom
+    from chat.models import ChatRoom, MessageDelivery
 
     now = timezone.now()
     one_hour_ago = now - timedelta(hours=1)
@@ -108,12 +109,12 @@ def monitor_api(request):
 
     # ── Rooms ──
     total_rooms = ChatRoom.objects.count()
-    direct_rooms = ChatRoom.objects.filter(room_type="DIRECT").count()
-    group_rooms = ChatRoom.objects.filter(room_type="GROUP").count()
+    direct_rooms = ChatRoom.objects.filter(room_type=ChatRoom.DIRECT).count()
+    group_rooms = ChatRoom.objects.filter(room_type=ChatRoom.GROUP).count()
 
     # ── Calls ──
     active_calls = list(
-        CallLog.objects.filter(status__in=["RINGING", "ONGOING"]).values(
+        CallLog.objects.filter(status__in=[CallLog.RINGING, CallLog.ONGOING]).values(
             "id", "caller__username", "callee__username", "status", "started_at"
         )
     )
@@ -124,7 +125,59 @@ def monitor_api(request):
 
     total_calls_today = CallLog.objects.filter(started_at__gte=one_day_ago).count()
     missed_calls_today = CallLog.objects.filter(
-        started_at__gte=one_day_ago, status="MISSED"
+        started_at__gte=one_day_ago, status=CallLog.MISSED
+    ).count()
+
+    # ── Reliability KPIs (message + call trust layers) ──
+    msg_ack_timeout_s = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
+    msg_overdue_cutoff = now - timedelta(seconds=msg_ack_timeout_s)
+
+    msg_created_24h = MessageDelivery.objects.filter(created_at__gte=one_day_ago).count()
+    msg_delivered_24h = MessageDelivery.objects.filter(
+        delivered_at__gte=one_day_ago,
+        status=MessageDelivery.STATUS_DELIVERED,
+    ).count()
+    msg_pending_total = MessageDelivery.objects.filter(
+        status=MessageDelivery.STATUS_PENDING,
+    ).count()
+    msg_pending_overdue = MessageDelivery.objects.filter(
+        status=MessageDelivery.STATUS_PENDING,
+        created_at__lt=msg_overdue_cutoff,
+    ).count()
+    msg_push_fallback_24h = MessageDelivery.objects.filter(
+        push_sent_at__gte=one_day_ago,
+    ).count()
+
+    delivered_rows = MessageDelivery.objects.filter(
+        delivered_at__gte=one_day_ago,
+        status=MessageDelivery.STATUS_DELIVERED,
+    ).values("created_at", "delivered_at")
+    ack_samples = [
+        (row["delivered_at"] - row["created_at"]).total_seconds() * 1000
+        for row in delivered_rows
+        if row.get("created_at") and row.get("delivered_at")
+    ]
+    msg_ack_avg_ms_24h = round(sum(ack_samples) / len(ack_samples), 2) if ack_samples else None
+
+    call_ack_timeout_s = int(getattr(settings, "CALL_INVITE_ACK_TIMEOUT_SECONDS", 12))
+    call_overdue_cutoff = now - timedelta(seconds=call_ack_timeout_s)
+    calls_started_24h = CallLog.objects.filter(started_at__gte=one_day_ago).count()
+    calls_ws_notified_24h = CallLog.objects.filter(
+        started_at__gte=one_day_ago,
+        ws_notified_at__isnull=False,
+    ).count()
+    calls_push_sent_24h = CallLog.objects.filter(
+        started_at__gte=one_day_ago,
+        push_sent_at__isnull=False,
+    ).count()
+    calls_invite_acked_24h = CallLog.objects.filter(
+        started_at__gte=one_day_ago,
+        invite_acked_at__isnull=False,
+    ).count()
+    calls_ack_pending_overdue = CallLog.objects.filter(
+        status=CallLog.RINGING,
+        started_at__lt=call_overdue_cutoff,
+        invite_acked_at__isnull=True,
     ).count()
 
     # ── Recent activity (last 10 messages) ──
@@ -166,5 +219,40 @@ def monitor_api(request):
             "active_count": len(active_calls),
             "today_total": total_calls_today,
             "today_missed": missed_calls_today,
+        },
+        "reliability": {
+            "message_ack_timeout_seconds": msg_ack_timeout_s,
+            "thresholds": {
+                "msg_ack_rate_healthy": float(getattr(settings, "MONITOR_MSG_ACK_RATE_HEALTHY", 0.99)),
+                "msg_ack_rate_degraded": float(getattr(settings, "MONITOR_MSG_ACK_RATE_DEGRADED", 0.95)),
+                "call_ack_rate_healthy": float(getattr(settings, "MONITOR_CALL_ACK_RATE_HEALTHY", 0.98)),
+                "call_ack_rate_degraded": float(getattr(settings, "MONITOR_CALL_ACK_RATE_DEGRADED", 0.90)),
+                "msg_pending_overdue_warn": int(getattr(settings, "MONITOR_MSG_PENDING_OVERDUE_WARN", 1)),
+                "msg_pending_overdue_crit": int(getattr(settings, "MONITOR_MSG_PENDING_OVERDUE_CRIT", 10)),
+                "call_pending_overdue_warn": int(getattr(settings, "MONITOR_CALL_PENDING_OVERDUE_WARN", 1)),
+                "call_pending_overdue_crit": int(getattr(settings, "MONITOR_CALL_PENDING_OVERDUE_CRIT", 5)),
+                "msg_push_fallback_warn": int(getattr(settings, "MONITOR_MSG_PUSH_FALLBACK_WARN", 1)),
+                "msg_push_fallback_crit": int(getattr(settings, "MONITOR_MSG_PUSH_FALLBACK_CRIT", 20)),
+                "msg_ack_avg_ms_healthy": int(getattr(settings, "MONITOR_MSG_ACK_AVG_MS_HEALTHY", 1200)),
+                "msg_ack_avg_ms_degraded": int(getattr(settings, "MONITOR_MSG_ACK_AVG_MS_DEGRADED", 3500)),
+            },
+            "messages": {
+                "created_24h": msg_created_24h,
+                "delivered_24h": msg_delivered_24h,
+                "ack_rate_24h": round((msg_delivered_24h / msg_created_24h), 4) if msg_created_24h else None,
+                "pending_total": msg_pending_total,
+                "pending_overdue": msg_pending_overdue,
+                "push_fallback_24h": msg_push_fallback_24h,
+                "ack_latency_avg_ms_24h": msg_ack_avg_ms_24h,
+            },
+            "calls": {
+                "ack_timeout_seconds": call_ack_timeout_s,
+                "started_24h": calls_started_24h,
+                "ws_notified_24h": calls_ws_notified_24h,
+                "push_sent_24h": calls_push_sent_24h,
+                "invite_acked_24h": calls_invite_acked_24h,
+                "invite_ack_rate_24h": round((calls_invite_acked_24h / calls_started_24h), 4) if calls_started_24h else None,
+                "ack_pending_overdue": calls_ack_pending_overdue,
+            },
         },
     })

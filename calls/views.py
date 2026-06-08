@@ -15,7 +15,6 @@ from rest_framework.views import APIView
 from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
-from chat.consumers import is_user_ws_connected
 
 
 def _build_ice_servers(connectivity_mode: str = 'auto') -> list[dict]:
@@ -150,19 +149,23 @@ class InitiateCallView(APIView):
                 },
             },
         )
+        call.ws_notified_at = timezone.now()
 
-        # Send push only if callee has NO active WebSocket connection (app fully closed).
-        # If WS is connected (foreground or background), the WS handler shows a local
-        # notification on the client side — sending FCM too would cause duplicates.
-        if not is_user_ws_connected(callee_id):
-            send_call_push(
-                callee_id=callee_id,
-                caller_name=request.user.username,
-                call_type=call_type,
-                call_id=str(call.id),
-                caller_id=request.user.id,
-                room_name=room_name,
-            )
+        # Always send push for incoming calls. Presence can be stale and a
+        # "connected" socket does not guarantee user-visible ringing.
+        # Client notification IDs are call_id-based, so duplicate surfaces are
+        # naturally deduped/updated in place.
+        push_sent = send_call_push(
+            callee_id=callee_id,
+            caller_name=request.user.username,
+            call_type=call_type,
+            call_id=str(call.id),
+            caller_id=request.user.id,
+            room_name=room_name,
+        )
+        if push_sent:
+            call.push_sent_at = timezone.now()
+        call.save(update_fields=["ws_notified_at", "push_sent_at"])
 
         # Optional LiveKit token
         lk_token = _try_create_livekit_token(room_name, request.user.username)

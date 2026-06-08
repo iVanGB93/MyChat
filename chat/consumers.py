@@ -6,12 +6,13 @@ from datetime import datetime
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
-from .models import ChatRoom, PendingDelivery
+from .models import ChatRoom, PendingDelivery, MessageDelivery
 from .push import send_message_push
 
 User = get_user_model()
@@ -28,6 +29,7 @@ _connected_notification_users: dict[int, dict] = {}
 # { room_id: set[user_id] }
 _connected_chat_users: dict[str, set[int]] = {}
 WS_AUTH_TIMEOUT_SECONDS = 10.0
+MESSAGE_ACK_TIMEOUT_SECONDS = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
 
 
 def get_connected_notification_users() -> list[dict]:
@@ -338,7 +340,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 sender_id = data.get("sender_id")
                 if not message_id or not sender_id:
                     return
-                await self.delete_pending_delivery(int(sender_id))
+                acked = await self.mark_message_delivery_acked(
+                    message_id=message_id,
+                    sender_id=int(sender_id),
+                    room_id=str(self.room_id),
+                )
+                if not acked:
+                    return
+                logger.info(
+                    "[DeliveryAck] ws room=%s message_id=%s sender=%s recipient=%s",
+                    str(self.room_id),
+                    message_id,
+                    int(sender_id),
+                    self.user.id,
+                )
                 for channel in get_user_notification_channels(int(sender_id)):
                     await self.channel_layer.send(
                         channel,
@@ -400,12 +415,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # Anyone who blocked the sender must never receive this fan-out.
             blockers = await self.get_blockers_of_sender()
             push_recipients: list[int] = []
+            tracked_delivery_count = 0
 
             for member_id in room_info["member_ids"]:
                 if member_id == self.user.id:
                     continue
                 if member_id in blockers:
                     continue
+                await self.create_message_delivery(message_id, member_id)
+                await self.create_pending_delivery(member_id)
+                tracked_delivery_count += 1
                 # A member counts as "already delivered via room group_send" only
                 # if their app is ALSO in the foreground. If they're connected to
                 # the room WS but app is backgrounded, we still need to push a
@@ -445,7 +464,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         )
                 else:
                     # Offline — create PendingDelivery record and queue for push
-                    await self.create_pending_delivery(member_id)
                     push_recipients.append(member_id)
 
             if push_recipients:
@@ -453,12 +471,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     "[Push] Sending push to %d offline user(s) (of %d total recipients)",
                     len(push_recipients), len(room_info["member_ids"]) - 1,
                 )
-                await self._send_message_push(
+                sent = await self._send_message_push(
                     recipient_ids=push_recipients,
                     sender_name=self.user.username,
-                    content=message_content[:120],
+                    content="New message waiting",
                     room_id=str(self.room_id),
                     room_name=room_info["name"],
+                )
+                if sent:
+                    await self.mark_push_sent(message_id, push_recipients)
+
+            # WS/notification delivery can look "connected" but still fail to reach
+            # the recipient. If we do not receive a message_ack in time, trigger
+            # push fallback for any still-pending recipients.
+            if tracked_delivery_count > 0:
+                asyncio.create_task(
+                    self.push_fallback_after_timeout(
+                        message_id=message_id,
+                        sender_name=self.user.username,
+                        room_name=room_info["name"],
+                    )
                 )
 
             # Acknowledge to sender: server received and relayed this message
@@ -602,13 +634,34 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self, recipient_ids, sender_name, content, room_id, room_name
     ):
         """Send Expo push notification for a new message (runs in thread)."""
-        send_message_push(
+        return send_message_push(
             recipient_ids=recipient_ids,
             sender_name=sender_name,
             content=content,
             room_id=room_id,
             room_name=room_name,
         )
+
+    async def push_fallback_after_timeout(self, message_id: str, sender_name: str, room_name: str):
+        await asyncio.sleep(MESSAGE_ACK_TIMEOUT_SECONDS)
+        pending_recipient_ids = await self.get_pending_recipients_for_message(message_id)
+        if not pending_recipient_ids:
+            return
+        sent = await self._send_message_push(
+            recipient_ids=pending_recipient_ids,
+            sender_name=sender_name,
+            content="New message waiting",
+            room_id=str(self.room_id),
+            room_name=room_name,
+        )
+        if sent:
+            await self.mark_push_sent(message_id, pending_recipient_ids)
+            logger.info(
+                "[DeliveryFallback] timeout_push room=%s message_id=%s recipients=%d",
+                str(self.room_id),
+                message_id,
+                len(pending_recipient_ids),
+            )
 
     @database_sync_to_async
     def mark_messages_read(self, message_ids: list) -> dict:
@@ -623,6 +676,66 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Return IDs of all room members except the current user."""
         room = ChatRoom.objects.get(id=self.room_id)
         return list(room.members.exclude(id=self.user.id).values_list("id", flat=True))
+
+    @database_sync_to_async
+    def create_message_delivery(self, message_id: str, recipient_id: int) -> None:
+        MessageDelivery.objects.get_or_create(
+            room_id=self.room_id,
+            message_id=message_id,
+            sender_id=self.user.id,
+            recipient_id=recipient_id,
+            defaults={"status": MessageDelivery.STATUS_PENDING},
+        )
+
+    @database_sync_to_async
+    def mark_message_delivery_acked(self, message_id: str, sender_id: int, room_id: str) -> bool:
+        now = timezone.now()
+        updated = MessageDelivery.objects.filter(
+            room_id=room_id,
+            message_id=message_id,
+            sender_id=sender_id,
+            recipient_id=self.user.id,
+            status=MessageDelivery.STATUS_PENDING,
+        ).update(
+            status=MessageDelivery.STATUS_DELIVERED,
+            delivered_at=now,
+        )
+        if not updated:
+            return False
+        has_pending_from_sender = MessageDelivery.objects.filter(
+            room_id=room_id,
+            sender_id=sender_id,
+            recipient_id=self.user.id,
+            status=MessageDelivery.STATUS_PENDING,
+        ).exists()
+        if not has_pending_from_sender:
+            PendingDelivery.objects.filter(
+                room_id=room_id,
+                from_user_id=sender_id,
+                to_user_id=self.user.id,
+            ).delete()
+        return True
+
+    @database_sync_to_async
+    def get_pending_recipients_for_message(self, message_id: str) -> list[int]:
+        return list(
+            MessageDelivery.objects.filter(
+                room_id=self.room_id,
+                message_id=message_id,
+                status=MessageDelivery.STATUS_PENDING,
+                push_sent_at__isnull=True,
+            ).values_list("recipient_id", flat=True)
+        )
+
+    @database_sync_to_async
+    def mark_push_sent(self, message_id: str, recipient_ids: list[int]) -> None:
+        if not recipient_ids:
+            return
+        MessageDelivery.objects.filter(
+            room_id=self.room_id,
+            message_id=message_id,
+            recipient_id__in=recipient_ids,
+        ).update(push_sent_at=timezone.now())
 
     @database_sync_to_async
     def get_blockers_of_sender(self) -> set[int]:
@@ -824,7 +937,20 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 room_id = data.get("room_id", "")
                 if not message_id or not sender_id or not room_id:
                     return
-                await self.delete_pending_delivery_notif(int(sender_id), room_id)
+                acked = await self.mark_message_delivery_acked_notif(
+                    message_id=message_id,
+                    sender_id=int(sender_id),
+                    room_id=str(room_id),
+                )
+                if not acked:
+                    return
+                logger.info(
+                    "[DeliveryAck] notif room=%s message_id=%s sender=%s recipient=%s",
+                    str(room_id),
+                    message_id,
+                    int(sender_id),
+                    self.user.id,
+                )
                 for channel in get_user_notification_channels(int(sender_id)):
                     await self.channel_layer.send(
                         channel,
@@ -838,6 +964,20 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                                 "room_id": room_id,
                             },
                         },
+                    )
+                return
+
+            # ---- Call invite ack (callee confirms incoming_call reached app) ----
+            if msg_type == "call_invite_ack":
+                call_id = data.get("call_id", "")
+                if not call_id:
+                    return
+                acked = await self.mark_call_invite_acked(call_id)
+                if acked:
+                    logger.info(
+                        "[CallInviteAck] call_id=%s callee=%s",
+                        call_id,
+                        self.user.id,
                     )
                 return
 
@@ -981,3 +1121,42 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             from_user_id=from_user_id,
             to_user=self.user,
         ).delete()
+
+    @database_sync_to_async
+    def mark_message_delivery_acked_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
+        now = timezone.now()
+        updated = MessageDelivery.objects.filter(
+            room_id=room_id,
+            message_id=message_id,
+            sender_id=sender_id,
+            recipient_id=self.user.id,
+            status=MessageDelivery.STATUS_PENDING,
+        ).update(
+            status=MessageDelivery.STATUS_DELIVERED,
+            delivered_at=now,
+        )
+        if not updated:
+            return False
+        has_pending_from_sender = MessageDelivery.objects.filter(
+            room_id=room_id,
+            sender_id=sender_id,
+            recipient_id=self.user.id,
+            status=MessageDelivery.STATUS_PENDING,
+        ).exists()
+        if not has_pending_from_sender:
+            PendingDelivery.objects.filter(
+                room_id=room_id,
+                from_user_id=sender_id,
+                to_user_id=self.user.id,
+            ).delete()
+        return True
+
+    @database_sync_to_async
+    def mark_call_invite_acked(self, call_id: str) -> bool:
+        from calls.models import CallLog
+        updated = CallLog.objects.filter(
+            id=call_id,
+            callee_id=self.user.id,
+            invite_acked_at__isnull=True,
+        ).update(invite_acked_at=timezone.now())
+        return bool(updated)
