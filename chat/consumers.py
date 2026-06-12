@@ -281,6 +281,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         )
                 return
 
+            # ---- message_update_ack: recipient confirmed it applied message_update(s) ----
+            if msg_type == "message_update_ack":
+                update_ids = data.get("update_ids", [])
+                sender_id = data.get("sender_id")
+                room_id = data.get("room_id", str(self.room_id))
+                if not update_ids or not sender_id:
+                    return
+                for channel in get_user_notification_channels(int(sender_id)):
+                    await self.channel_layer.send(
+                        channel,
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "message_update_ack",
+                                "room_id": str(room_id),
+                                "update_ids": update_ids,
+                                "by_user_id": self.user.id,
+                                "by_username": self.user.username,
+                            },
+                        },
+                    )
+                return
+
             # ---- ready_to_receive: offline user connected — signal senders to flush outbox ----
             if msg_type == "ready_to_receive":
                 pending_senders = await self.get_pending_senders_for_room()
@@ -554,6 +577,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return
             await self.send(text_data=json.dumps({
                 "type": "message_update",
+                "sender_id": event.get("sender_id"),
                 "updates": event["updates"],
             }))
         except Exception:
@@ -962,6 +986,29 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                                 "by_user_id": self.user.id,
                                 "by_username": self.user.username,
                                 "room_id": room_id,
+                            },
+                        },
+                    )
+                return
+
+            # ---- message_update_ack: recipient confirmed it applied update(s) ----
+            if msg_type == "message_update_ack":
+                update_ids = data.get("update_ids", [])
+                sender_id = data.get("sender_id")
+                room_id = data.get("room_id", "")
+                if not update_ids or not sender_id or not room_id:
+                    return
+                for channel in get_user_notification_channels(int(sender_id)):
+                    await self.channel_layer.send(
+                        channel,
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "message_update_ack",
+                                "room_id": str(room_id),
+                                "update_ids": update_ids,
+                                "by_user_id": self.user.id,
+                                "by_username": self.user.username,
                             },
                         },
                     )
