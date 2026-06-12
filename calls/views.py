@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 import time
 import uuid
 
@@ -15,6 +16,10 @@ from rest_framework.views import APIView
 from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
+from chat.consumers import get_user_notification_channels, get_user_presence_state
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_ice_servers(connectivity_mode: str = 'auto') -> list[dict]:
@@ -133,23 +138,43 @@ class InitiateCallView(APIView):
             status=CallLog.RINGING,
         )
 
-        # Notify callee via WebSocket
-        channel_layer = get_channel_layer()
-        async_to_sync(channel_layer.group_send)(
-            f"notifications_{callee_id}",
-            {
-                "type": "notify",
-                "payload": {
-                    "event": "incoming_call",
-                    "call_id": str(call.id),
-                    "caller": request.user.username,
-                    "caller_id": request.user.id,
-                    "call_type": call_type,
-                    "room_name": room_name,
+        # Notify callee via WebSocket when at least one notification channel exists.
+        # If WS is closed/stale, push is still sent below as the authoritative surface.
+        ws_channels = get_user_notification_channels(int(callee_id))
+        callee_presence = get_user_presence_state(int(callee_id))
+        if ws_channels:
+            channel_layer = get_channel_layer()
+            async_to_sync(channel_layer.group_send)(
+                f"notifications_{callee_id}",
+                {
+                    "type": "notify",
+                    "payload": {
+                        "event": "incoming_call",
+                        "call_id": str(call.id),
+                        "caller": request.user.username,
+                        "caller_id": request.user.id,
+                        "call_type": call_type,
+                        "room_name": room_name,
+                    },
                 },
-            },
-        )
-        call.ws_notified_at = timezone.now()
+            )
+            call.ws_notified_at = timezone.now()
+            logger.info(
+                "[NotifyDecision] kind=call route=notif_ws call_id=%s caller=%s callee=%s presence=%s channels=%d",
+                str(call.id),
+                request.user.id,
+                int(callee_id),
+                callee_presence,
+                len(ws_channels),
+            )
+        else:
+            logger.info(
+                "[NotifyDecision] kind=call route=ws_unavailable call_id=%s caller=%s callee=%s presence=%s",
+                str(call.id),
+                request.user.id,
+                int(callee_id),
+                callee_presence,
+            )
 
         # Always send push for incoming calls. Presence can be stale and a
         # "connected" socket does not guarantee user-visible ringing.
@@ -162,6 +187,13 @@ class InitiateCallView(APIView):
             call_id=str(call.id),
             caller_id=request.user.id,
             room_name=room_name,
+        )
+        logger.info(
+            "[NotifyDecision] kind=call route=push call_id=%s caller=%s callee=%s sent=%s",
+            str(call.id),
+            request.user.id,
+            int(callee_id),
+            bool(push_sent),
         )
         if push_sent:
             call.push_sent_at = timezone.now()
@@ -195,7 +227,11 @@ class JoinCallView(APIView):
             )
 
         call.status = CallLog.ONGOING
-        call.save(update_fields=["status"])
+        if call.invite_acked_at is None:
+            call.invite_acked_at = timezone.now()
+            call.save(update_fields=["status", "invite_acked_at"])
+        else:
+            call.save(update_fields=["status"])
 
         # Notify caller that the call was accepted
         channel_layer = get_channel_layer()
