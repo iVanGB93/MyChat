@@ -19,9 +19,12 @@ class MemberSerializer(serializers.ModelSerializer):
         fields = ("id", "username", "display_name", "user_tag", "is_online", "avatar")
 
     def get_avatar(self, obj: User) -> str | None:
-        profile = getattr(obj, "profile", None)
+        try:
+            profile = obj.profile
+        except Exception:
+            return None
         avatar = getattr(profile, "avatar", None)
-        return getattr(avatar, "url", None)
+        return avatar.url if avatar and getattr(avatar, "name", "") else None
 
     def get_display_name(self, obj: User) -> str:
         profile = getattr(obj, "profile", None)

@@ -34,11 +34,18 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        profile = getattr(instance, "profile", None)
-        presence = getattr(instance, "presence", None)
+        try:
+            profile = instance.profile
+        except Exception:
+            profile = None
+        try:
+            presence = instance.presence
+        except Exception:
+            presence = None
 
         if profile is not None:
-            data["avatar"] = profile.avatar.url if getattr(profile.avatar, "url", None) else None
+            avatar = getattr(profile, "avatar", None)
+            data["avatar"] = avatar.url if avatar and getattr(avatar, "name", "") else None
             data["bio"] = profile.bio
             data["display_name"] = profile.display_name
             data["user_tag"] = profile.user_tag
