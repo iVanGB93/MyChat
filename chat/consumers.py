@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import json
 import logging
 import threading
@@ -15,6 +16,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from .models import ChatRoom, PendingDelivery, MessageDelivery
 from .push import send_message_push
+from users.models import UserDevice, UserPresence
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -37,9 +39,24 @@ _connected_notification_users: dict[int, dict] = {}
 # Chat room WS connections
 # { room_id: set[user_id] }
 _connected_chat_users: dict[str, set[int]] = {}
+_decision_audit: deque[dict] = deque(maxlen=500)
 WS_AUTH_TIMEOUT_SECONDS = 10.0
 MESSAGE_ACK_TIMEOUT_SECONDS = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
 PRESENCE_STALE_SECONDS = int(getattr(settings, "PRESENCE_STALE_SECONDS", 70))
+
+
+def _get_notification_socket_snapshot(user_id: int) -> tuple[int, str]:
+    with _connected_lock:
+        entry = _connected_notification_users.get(user_id)
+        if not entry:
+            return 0, UserPresence.APP_STATE_UNKNOWN
+        return len(entry["channels"]), entry.get("app_state", UserPresence.APP_STATE_UNKNOWN)
+
+
+def _get_chat_socket_snapshot(user_id: int) -> tuple[int, str]:
+    with _connected_lock:
+        room_ids = [room_id for room_id, users in _connected_chat_users.items() if user_id in users]
+        return len(room_ids), room_ids[0] if room_ids else ""
 
 
 def _is_entry_fresh(entry: dict) -> bool:
@@ -56,13 +73,128 @@ def _touch_notification_presence(user_id: int) -> None:
 
 def get_user_presence_state(user_id: int) -> str:
     """Return active/background/disconnected/stale for notification routing."""
+    try:
+        presence = UserPresence.objects.get(user_id=user_id)
+    except UserPresence.DoesNotExist:
+        return "disconnected"
+
+    if not presence.notification_socket_connected and not presence.chat_socket_connected:
+        return "disconnected"
+    if presence.is_stale(PRESENCE_STALE_SECONDS):
+        return "stale"
+    if presence.chat_socket_connected or presence.app_state == UserPresence.APP_STATE_ACTIVE:
+        return "active"
+    return "background"
+
+
+def get_user_routing_state(user_id: int) -> dict:
+    """Return structured backend state used for notification routing decisions."""
+    try:
+        presence = UserPresence.objects.get(user_id=user_id)
+    except UserPresence.DoesNotExist:
+        presence = None
+
+    push_available = UserDevice.objects.filter(
+        user_id=user_id,
+        is_active=True,
+        expo_push_token__startswith="ExponentPushToken[",
+    ).exists()
+
+    if presence is None:
+        return {
+            "presence": "disconnected",
+            "app_state": UserPresence.APP_STATE_UNKNOWN,
+            "chat_ws_connected": False,
+            "chat_ws_count": 0,
+            "notification_ws_connected": False,
+            "notification_ws_count": 0,
+            "active_room_id": "",
+            "push_available": push_available,
+            "is_online": False,
+            "is_stale": True,
+        }
+
+    is_stale = presence.is_stale(PRESENCE_STALE_SECONDS)
+    if not presence.notification_socket_connected and not presence.chat_socket_connected:
+        presence_state = "disconnected"
+    elif is_stale:
+        presence_state = "stale"
+    elif presence.chat_socket_connected or presence.app_state == UserPresence.APP_STATE_ACTIVE:
+        presence_state = "active"
+    else:
+        presence_state = "background"
+
+    return {
+        "presence": presence_state,
+        "app_state": presence.app_state,
+        "chat_ws_connected": presence.chat_socket_connected,
+        "chat_ws_count": presence.chat_socket_count,
+        "notification_ws_connected": presence.notification_socket_connected,
+        "notification_ws_count": presence.notification_socket_count,
+        "active_room_id": presence.active_room_id,
+        "push_available": push_available,
+        "is_online": presence.is_online,
+        "is_stale": is_stale,
+    }
+
+
+def decide_message_notification_route(room_id: str, routing_state: dict, in_room_via_chat_ws: bool, has_notification_channels: bool) -> str:
+    if (
+        routing_state["presence"] == "active"
+        and in_room_via_chat_ws
+        and routing_state["chat_ws_connected"]
+        and routing_state["active_room_id"] == str(room_id)
+    ):
+        return "room_ws_active"
+    if has_notification_channels and routing_state["notification_ws_connected"] and not routing_state["is_stale"]:
+        return "notif_ws"
+    if routing_state["push_available"]:
+        return "push_initial"
+    return "pending_only"
+
+
+def decide_call_notification_route(routing_state: dict, has_notification_channels: bool) -> str:
+    if has_notification_channels and routing_state["notification_ws_connected"] and not routing_state["is_stale"]:
+        return "notif_ws"
+    return "ws_unavailable"
+
+
+def record_notification_decision(
+    *,
+    kind: str,
+    route: str,
+    correlation_id: str,
+    route_reason: str,
+    sender_id: int | None = None,
+    recipient_id: int | None = None,
+    room_id: str | None = None,
+    call_id: str | None = None,
+    routing_state: dict | None = None,
+) -> None:
     with _connected_lock:
-        entry = _connected_notification_users.get(user_id)
-        if not entry:
-            return "disconnected"
-        if not _is_entry_fresh(entry):
-            return "stale"
-        return "active" if entry.get("app_state") == "active" else "background"
+        _decision_audit.appendleft({
+            "at": timezone.now().isoformat(),
+            "kind": kind,
+            "route": route,
+            "correlation_id": correlation_id,
+            "route_reason": route_reason,
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "room_id": room_id,
+            "call_id": call_id,
+            "routing_state": routing_state or {},
+        })
+
+
+def get_recent_notification_decisions(user_id: int | None = None, limit: int = 50) -> list[dict]:
+    with _connected_lock:
+        rows = list(_decision_audit)
+    if user_id is not None:
+        rows = [
+            row for row in rows
+            if row.get("sender_id") == user_id or row.get("recipient_id") == user_id
+        ]
+    return rows[:limit]
 
 
 def get_connected_notification_users() -> list[dict]:
@@ -177,6 +309,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self._accepted = True
         with _connected_lock:
             _connected_chat_users.setdefault(self.room_id, set()).add(self.user.id)
+        chat_socket_count, active_room_id = _get_chat_socket_snapshot(self.user.id)
+        await self._sync_chat_presence(chat_socket_count, active_room_id)
 
     async def _auth_timeout(self):
         """Close the connection if no auth message arrives within auth timeout."""
@@ -208,6 +342,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     room_users = _connected_chat_users.get(self.room_id)
                     if room_users:
                         room_users.discard(self.user.id)
+                        if not room_users:
+                            del _connected_chat_users[self.room_id]
+                chat_socket_count, active_room_id = _get_chat_socket_snapshot(self.user.id)
+                await self._sync_chat_presence(chat_socket_count, active_room_id)
         except Exception:
             logger.exception("[ChatConsumer] disconnect handler failed code=%s", close_code)
 
@@ -458,6 +596,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "content": message_content,
                 "message_type": message_type_str,
                 "created_at": created_at,
+                "correlation_id": f"msg:{message_id}",
+                "route_reason": "room_ws",
             })
 
             # Broadcast to all users currently in this room's chat WS
@@ -484,6 +624,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 if member_id == self.user.id:
                     continue
                 if member_id in blockers:
+                    record_notification_decision(
+                        kind="message",
+                        route="blocked",
+                        correlation_id=f"msg:{message_id}",
+                        route_reason="blocked_by_recipient",
+                        sender_id=self.user.id,
+                        recipient_id=member_id,
+                        room_id=str(self.room_id),
+                    )
                     logger.info(
                         "[NotifyDecision] kind=message route=blocked room=%s message_id=%s sender=%s recipient=%s",
                         str(self.room_id),
@@ -495,32 +644,58 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 await self.create_message_delivery(message_id, member_id)
                 await self.create_pending_delivery(member_id)
                 tracked_delivery_count += 1
-                presence_state = get_user_presence_state(member_id)
+                routing_state = await self.get_user_routing_state(member_id)
+                member_channels = get_user_notification_channels(member_id)
+                route = decide_message_notification_route(
+                    room_id=str(self.room_id),
+                    routing_state=routing_state,
+                    in_room_via_chat_ws=member_id in in_room_ids,
+                    has_notification_channels=bool(member_channels),
+                )
                 # A member counts as "already delivered via room group_send" only
                 # if their app is ALSO in the foreground. If they're connected to
                 # the room WS but app is backgrounded, we still need to push a
                 # notification — and the per-socket chat_message handler below
                 # suppresses the in-app delivery to that backgrounded socket.
-                if member_id in in_room_ids and presence_state == "active":
+                if route == "room_ws_active":
+                    record_notification_decision(
+                        kind="message",
+                        route=route,
+                        correlation_id=f"msg:{message_id}",
+                        route_reason="recipient_active_in_room",
+                        sender_id=self.user.id,
+                        recipient_id=member_id,
+                        room_id=str(self.room_id),
+                        routing_state=routing_state,
+                    )
                     logger.info(
-                        "[NotifyDecision] kind=message route=room_ws_active room=%s message_id=%s sender=%s recipient=%s presence=%s",
+                        "[NotifyDecision] kind=message route=room_ws_active room=%s message_id=%s sender=%s recipient=%s state=%s",
                         str(self.room_id),
                         message_id,
                         self.user.id,
                         member_id,
-                        presence_state,
+                        routing_state,
                     )
                     continue
 
-                member_channels = get_user_notification_channels(member_id)
-                if member_channels:
+                if route == "notif_ws":
+                    record_notification_decision(
+                        kind="message",
+                        route=route,
+                        correlation_id=f"msg:{message_id}",
+                        route_reason="notification_ws_available",
+                        sender_id=self.user.id,
+                        recipient_id=member_id,
+                        room_id=str(self.room_id),
+                        routing_state=routing_state,
+                    )
                     logger.info(
-                        "[NotifyDecision] kind=message route=notif_ws room=%s message_id=%s sender=%s recipient=%s presence=%s channels=%d",
+                        "[NotifyDecision] kind=message route=notif_ws room=%s message_id=%s sender=%s recipient=%s state=%s channels=%d",
                         str(self.room_id),
                         message_id,
                         self.user.id,
                         member_id,
-                        presence_state,
+                        routing_state,
                         len(member_channels),
                     )
                     # Online — relay to ALL notification sessions (multi-device support).
@@ -536,6 +711,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         "message_id": message_id,
                         "message_type": message_type_str,
                         "created_at": created_at,
+                        "correlation_id": f"msg:{message_id}",
+                        "route_reason": "notif_ws",
                     }
                     # Forward any extra client-supplied fields (e.g. reply_to)
                     # without the consumer having to know about them.
@@ -550,17 +727,46 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 "payload": notify_payload,
                             },
                         )
-                else:
-                    # Offline — create PendingDelivery record and queue for push
+                elif route == "push_initial":
+                    # Offline but push-capable — keep a pending marker and queue push.
+                    record_notification_decision(
+                        kind="message",
+                        route=route,
+                        correlation_id=f"msg:{message_id}",
+                        route_reason="push_available_ws_unavailable",
+                        sender_id=self.user.id,
+                        recipient_id=member_id,
+                        room_id=str(self.room_id),
+                        routing_state=routing_state,
+                    )
                     logger.info(
-                        "[NotifyDecision] kind=message route=push_initial room=%s message_id=%s sender=%s recipient=%s presence=%s",
+                        "[NotifyDecision] kind=message route=push_initial room=%s message_id=%s sender=%s recipient=%s state=%s",
                         str(self.room_id),
                         message_id,
                         self.user.id,
                         member_id,
-                        presence_state,
+                        routing_state,
                     )
                     push_recipients.append(member_id)
+                else:
+                    record_notification_decision(
+                        kind="message",
+                        route=route,
+                        correlation_id=f"msg:{message_id}",
+                        route_reason="no_push_endpoint_available",
+                        sender_id=self.user.id,
+                        recipient_id=member_id,
+                        room_id=str(self.room_id),
+                        routing_state=routing_state,
+                    )
+                    logger.info(
+                        "[NotifyDecision] kind=message route=pending_only room=%s message_id=%s sender=%s recipient=%s state=%s",
+                        str(self.room_id),
+                        message_id,
+                        self.user.id,
+                        member_id,
+                        routing_state,
+                    )
 
             if push_recipients:
                 logger.info(
@@ -573,9 +779,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     content="New message waiting",
                     room_id=str(self.room_id),
                     room_name=room_info["name"],
+                    correlation_id=f"msg:{message_id}",
+                    route_reason="push_initial",
                 )
                 if sent:
                     await self.mark_push_sent(message_id, push_recipients)
+                    for recipient_id in push_recipients:
+                        record_notification_decision(
+                            kind="message",
+                            route="push_sent",
+                            correlation_id=f"msg:{message_id}",
+                            route_reason="push_initial_sent",
+                            sender_id=self.user.id,
+                            recipient_id=recipient_id,
+                            room_id=str(self.room_id),
+                        )
 
             # WS/notification delivery can look "connected" but still fail to reach
             # the recipient. If we do not receive a message_ack in time, trigger
@@ -593,6 +811,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=json.dumps({
                 "type": "message_server_ack",
                 "message_id": message_id,
+                "correlation_id": f"msg:{message_id}",
             }))
         except Exception:
             logger.exception(
@@ -724,11 +943,37 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def set_user_online(self, online: bool):
-        User.objects.filter(id=self.user.id).update(is_online=online)
+        now = timezone.now()
+        User.objects.filter(id=self.user.id).update(is_online=online, last_seen=now)
+        UserPresence.objects.update_or_create(
+            user=self.user,
+            defaults={"is_online": online, "last_seen": now},
+        )
+
+    @database_sync_to_async
+    def _sync_chat_presence(self, chat_socket_count: int, active_room_id: str):
+        now = timezone.now()
+        presence, _ = UserPresence.objects.get_or_create(
+            user=self.user,
+            defaults={"last_seen": now},
+        )
+        is_online = bool(chat_socket_count) or (
+            presence.notification_socket_connected
+            and presence.app_state == UserPresence.APP_STATE_ACTIVE
+        )
+        UserPresence.objects.filter(pk=presence.pk).update(
+            chat_socket_count=chat_socket_count,
+            chat_socket_connected=chat_socket_count > 0,
+            active_room_id=active_room_id if chat_socket_count > 0 else "",
+            last_chat_seen_at=now,
+            last_seen=now,
+            is_online=is_online,
+        )
+        User.objects.filter(id=self.user.id).update(is_online=is_online, last_seen=now)
 
     @database_sync_to_async
     def _send_message_push(
-        self, recipient_ids, sender_name, content, room_id, room_name
+        self, recipient_ids, sender_name, content, room_id, room_name, correlation_id=None, route_reason=None
     ):
         """Send Expo push notification for a new message (runs in thread)."""
         return send_message_push(
@@ -737,6 +982,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             content=content,
             room_id=room_id,
             room_name=room_name,
+            correlation_id=correlation_id,
+            route_reason=route_reason,
         )
 
     async def push_fallback_after_timeout(self, message_id: str, sender_name: str, room_name: str):
@@ -750,6 +997,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             content="New message waiting",
             room_id=str(self.room_id),
             room_name=room_name,
+            correlation_id=f"msg:{message_id}",
+            route_reason="push_fallback_timeout",
         )
         if sent:
             await self.mark_push_sent(message_id, pending_recipient_ids)
@@ -907,9 +1156,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "last_seen_ts": time.time(),
                 }
         try:
-            await self._set_user_online(True)
+            notification_socket_count, app_state = _get_notification_socket_snapshot(self.user.id)
+            await self._sync_notification_presence(notification_socket_count, app_state=app_state, touch=True)
         except Exception:
-            logger.exception("[NotificationConsumer] _set_user_online failed user=%s", self.user.id)
+            logger.exception("[NotificationConsumer] _sync_notification_presence failed user=%s", self.user.id)
 
         # Notify client of any messages waiting for delivery from offline senders
         try:
@@ -972,11 +1222,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                             del _connected_notification_users[self.user.id]
                 # Mark user offline in DB when last WS disconnects
                 still_connected = is_user_ws_connected(self.user.id)
-                if not still_connected:
-                    try:
-                        await self._set_user_online(False)
-                    except Exception:
-                        logger.exception("[NotificationConsumer] _set_user_online(False) failed")
+                try:
+                    notification_socket_count, _app_state = _get_notification_socket_snapshot(self.user.id)
+                    await self._sync_notification_presence(notification_socket_count, touch=True)
+                except Exception:
+                    logger.exception("[NotificationConsumer] _sync_notification_presence(disconnect) failed")
                 logger.info("[WS] Notification disconnected: user=%s code=%s (still_connected=%s)",
                             self.user.username, close_code, still_connected)
         except Exception:
@@ -1014,6 +1264,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             # ---- Respond to keep-alive pings ----
             if msg_type == "ping":
                 _touch_notification_presence(self.user.id)
+                notification_socket_count, _app_state = _get_notification_socket_snapshot(self.user.id)
+                await self._sync_notification_presence(notification_socket_count, touch=True)
                 await self.send(text_data=json.dumps({"type": "pong"}))
                 return
 
@@ -1025,8 +1277,9 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     if entry:
                         entry["app_state"] = state
                         entry["last_seen_ts"] = time.time()
+                notification_socket_count, _app_state = _get_notification_socket_snapshot(self.user.id)
+                await self._sync_notification_presence(notification_socket_count, app_state=state, touch=True)
                 is_online = state == "active"
-                await self._set_user_online(is_online)
                 logger.info("[WS] app_state=%s user=%s → is_online=%s",
                             state, self.user.username, is_online)
                 return
@@ -1219,11 +1472,52 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 id=self.user.id,
                 last_seen__lt=now - timedelta(seconds=30),
             ).update(last_seen=now)
+            UserPresence.objects.update_or_create(
+                user=self.user,
+                defaults={"is_online": online, "last_seen": now},
+            )
             return
         User.objects.filter(id=self.user.id).update(
             is_online=online,
             last_seen=timezone.now(),
         )
+        UserPresence.objects.update_or_create(
+            user=self.user,
+            defaults={"is_online": online, "last_seen": timezone.now()},
+        )
+
+    @database_sync_to_async
+    def _sync_notification_presence(self, notification_socket_count: int, app_state: str | None = None, touch: bool = False):
+        now = timezone.now()
+        presence, _ = UserPresence.objects.get_or_create(
+            user=self.user,
+            defaults={"last_seen": now},
+        )
+        next_app_state = app_state or presence.app_state or UserPresence.APP_STATE_UNKNOWN
+        notification_connected = notification_socket_count > 0
+        is_online = presence.chat_socket_connected or (
+            notification_connected and next_app_state == UserPresence.APP_STATE_ACTIVE
+        )
+        updates = {
+            "notification_socket_count": notification_socket_count,
+            "notification_socket_connected": notification_connected,
+            "is_online": is_online,
+        }
+        if touch:
+            updates["last_notification_seen_at"] = now
+            updates["last_seen"] = now
+        if app_state is not None:
+            updates["app_state"] = app_state
+            updates["last_app_state_change_at"] = now
+        UserPresence.objects.filter(pk=presence.pk).update(**updates)
+        if touch or app_state is not None:
+            User.objects.filter(id=self.user.id).update(is_online=is_online, last_seen=now)
+        else:
+            User.objects.filter(id=self.user.id).update(is_online=is_online)
+
+    @database_sync_to_async
+    def get_user_routing_state(self, user_id: int) -> dict:
+        return get_user_routing_state(user_id)
 
     @database_sync_to_async
     def get_pending_deliveries(self) -> list[dict]:

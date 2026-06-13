@@ -12,6 +12,7 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
+from users.models import UserDevice, UserPresence
 
 User = get_user_model()
 
@@ -72,6 +73,7 @@ def monitor_api(request):
     from calls.models import CallLog
     from chat.consumers import get_connected_chat_rooms, get_connected_notification_users
     from chat.models import ChatRoom, MessageDelivery
+    from users.models import UserPresence
 
     now = timezone.now()
     one_hour_ago = now - timedelta(hours=1)
@@ -79,17 +81,20 @@ def monitor_api(request):
 
     # ── Users ──
     total_users = User.objects.count()
-    online_users = User.objects.filter(is_online=True)
-    online_list = list(
-        online_users.values("id", "username", "last_seen").order_by("-last_seen")
-    )
-    for u in online_list:
-        if u["last_seen"]:
-            u["last_seen"] = u["last_seen"].isoformat()
+    online_users = UserPresence.objects.filter(is_online=True).select_related("user")
+    online_list = [
+        {
+            "id": presence.user_id,
+            "username": presence.user.username,
+            "last_seen": presence.last_seen.isoformat() if presence.last_seen else None,
+        }
+        for presence in online_users.order_by("-last_seen")
+    ]
 
-    users_with_push = User.objects.exclude(expo_push_token__isnull=True).exclude(
-        expo_push_token=""
-    ).count()
+    users_with_push = User.objects.filter(
+        devices__is_active=True,
+        devices__expo_push_token__startswith="ExponentPushToken[",
+    ).distinct().count()
 
     # ── WebSocket connections (in-memory) ──
     ws_notification_users = get_connected_notification_users()
@@ -255,4 +260,66 @@ def monitor_api(request):
                 "ack_pending_overdue": calls_ack_pending_overdue,
             },
         },
+    })
+
+
+@staff_member_required
+def monitor_routing_view(request, user_id: int):
+    """Inspect the structured notification-routing state for one user."""
+    from chat.consumers import get_recent_notification_decisions, get_user_notification_channels, get_user_routing_state
+
+    try:
+        user = User.objects.select_related("profile", "presence").get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "user_not_found", "user_id": user_id}, status=404)
+
+    routing_state = get_user_routing_state(user_id)
+    channels = sorted(get_user_notification_channels(user_id))
+    devices = list(
+        user.devices.order_by("-last_seen").values(
+            "installation_id",
+            "platform",
+            "device_name",
+            "app_version",
+            "is_active",
+            "last_seen",
+            "updated_at",
+        )
+    )
+    for device in devices:
+        if device.get("last_seen"):
+            device["last_seen"] = device["last_seen"].isoformat()
+        if device.get("updated_at"):
+            device["updated_at"] = device["updated_at"].isoformat()
+
+    presence = getattr(user, "presence", None)
+    presence_payload = None
+    if presence is not None:
+        presence_payload = {
+            "is_online": presence.is_online,
+            "app_state": presence.app_state,
+            "chat_socket_connected": presence.chat_socket_connected,
+            "chat_socket_count": presence.chat_socket_count,
+            "notification_socket_connected": presence.notification_socket_connected,
+            "notification_socket_count": presence.notification_socket_count,
+            "active_room_id": presence.active_room_id,
+            "last_seen": presence.last_seen.isoformat() if presence.last_seen else None,
+            "last_notification_seen_at": presence.last_notification_seen_at.isoformat() if presence.last_notification_seen_at else None,
+            "last_chat_seen_at": presence.last_chat_seen_at.isoformat() if presence.last_chat_seen_at else None,
+            "last_app_state_change_at": presence.last_app_state_change_at.isoformat() if presence.last_app_state_change_at else None,
+        }
+
+    return JsonResponse({
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "display_name": getattr(getattr(user, "profile", None), "display_name", "") or user.username,
+        },
+        "routing_state": routing_state,
+        "presence": presence_payload,
+        "notification_channels": channels,
+        "notification_channel_count": len(channels),
+        "devices": devices,
+        "device_count": len(devices),
+        "recent_decisions": get_recent_notification_decisions(user_id=user_id, limit=50),
     })

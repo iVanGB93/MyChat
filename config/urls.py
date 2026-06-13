@@ -32,6 +32,7 @@ urlpatterns = [
     # Monitoring dashboard
     path("monitor/", views.monitor_view, name="monitor"),
     path("api/monitor/", views.monitor_api, name="monitor-api"),
+    path("api/monitor/routing/<int:user_id>/", views.monitor_routing_view, name="monitor-routing-api"),
     # Admin
     path("admin/", admin.site.urls),
     # REST API

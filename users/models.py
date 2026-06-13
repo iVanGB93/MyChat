@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 from .db_storage import db_storage
 
@@ -36,10 +37,6 @@ class User(AbstractUser):
     bio = models.CharField(max_length=200, blank=True, default="")
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(auto_now=True)
-    expo_push_token = models.CharField(
-        max_length=200, blank=True, default="",
-        help_text="Expo push notification token for this device",
-    )
     connectivity_mode = models.CharField(
         max_length=10,
         choices=CONNECTIVITY_CHOICES,
@@ -93,6 +90,36 @@ class User(AbstractUser):
     def __str__(self) -> str:
         return self.username
 
+    def _sync_profile_row(self) -> None:
+        UserProfile.objects.update_or_create(
+            user=self,
+            defaults={
+                "avatar": self.avatar,
+                "bio": self.bio,
+                "display_name": self.display_name,
+                "user_tag": self.user_tag,
+                "discoverable_by_username": self.discoverable_by_username,
+                "discoverable_by_email": self.discoverable_by_email,
+                "connectivity_mode": self.connectivity_mode,
+                "notif_messages_enabled": self.notif_messages_enabled,
+                "notif_calls_enabled": self.notif_calls_enabled,
+                "notif_sound_enabled": self.notif_sound_enabled,
+            },
+        )
+
+    def _sync_presence_row(self) -> None:
+        UserPresence.objects.update_or_create(
+            user=self,
+            defaults={
+                "is_online": self.is_online,
+                "last_seen": self.last_seen or timezone.now(),
+            },
+        )
+
+    def _sync_companion_rows(self) -> None:
+        self._sync_profile_row()
+        self._sync_presence_row()
+
     def save(self, *args, **kwargs):
         """Auto-assign `user_tag` on first save with bounded retries.
 
@@ -104,20 +131,165 @@ class User(AbstractUser):
         from django.db import IntegrityError, transaction
 
         if self.user_tag:
-            return super().save(*args, **kwargs)
+            result = super().save(*args, **kwargs)
+            self._sync_companion_rows()
+            return result
 
         last_err = None
         for _ in range(6):
             self.user_tag = _generate_user_tag()
             try:
                 with transaction.atomic():
-                    return super().save(*args, **kwargs)
+                    result = super().save(*args, **kwargs)
+                self._sync_companion_rows()
+                return result
             except IntegrityError as exc:
                 last_err = exc
                 self.user_tag = None
                 continue
         # Surface the original error if we somehow exhausted retries.
         raise last_err  # pragma: no cover
+
+
+class UserProfile(models.Model):
+    """Stable per-user metadata separated from auth/runtime state."""
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="profile"
+    )
+    avatar = models.ImageField(
+        upload_to="avatars/", blank=True, null=True, storage=db_storage,
+    )
+    bio = models.CharField(max_length=200, blank=True, default="")
+    display_name = models.CharField(max_length=50, blank=True, default="")
+    user_tag = models.CharField(max_length=16, unique=True, db_index=True, blank=True, null=True)
+    discoverable_by_username = models.BooleanField(default=True)
+    discoverable_by_email = models.BooleanField(default=False)
+    connectivity_mode = models.CharField(
+        max_length=10,
+        choices=User.CONNECTIVITY_CHOICES,
+        default=User.CONNECTIVITY_AUTO,
+    )
+    notif_messages_enabled = models.BooleanField(default=True)
+    notif_calls_enabled = models.BooleanField(default=True)
+    notif_sound_enabled = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["user__username"]
+
+    def __str__(self) -> str:
+        return f"Profile<{self.user.username}>"
+
+    def save(self, *args, **kwargs):
+        result = super().save(*args, **kwargs)
+        User.objects.filter(pk=self.user_id).update(
+            avatar=self.avatar,
+            bio=self.bio,
+            display_name=self.display_name,
+            user_tag=self.user_tag,
+            discoverable_by_username=self.discoverable_by_username,
+            discoverable_by_email=self.discoverable_by_email,
+            connectivity_mode=self.connectivity_mode,
+            notif_messages_enabled=self.notif_messages_enabled,
+            notif_calls_enabled=self.notif_calls_enabled,
+            notif_sound_enabled=self.notif_sound_enabled,
+        )
+        return result
+
+
+class UserPresence(models.Model):
+    """Volatile backend routing state used for notification decisions."""
+
+    APP_STATE_UNKNOWN = "unknown"
+    APP_STATE_ACTIVE = "active"
+    APP_STATE_BACKGROUND = "background"
+    APP_STATE_CHOICES = [
+        (APP_STATE_UNKNOWN, "Unknown"),
+        (APP_STATE_ACTIVE, "Active"),
+        (APP_STATE_BACKGROUND, "Background"),
+    ]
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="presence"
+    )
+    is_online = models.BooleanField(default=False)
+    last_seen = models.DateTimeField(default=timezone.now)
+    notification_socket_connected = models.BooleanField(default=False)
+    notification_socket_count = models.PositiveIntegerField(default=0)
+    chat_socket_connected = models.BooleanField(default=False)
+    chat_socket_count = models.PositiveIntegerField(default=0)
+    app_state = models.CharField(
+        max_length=16,
+        choices=APP_STATE_CHOICES,
+        default=APP_STATE_UNKNOWN,
+    )
+    active_room_id = models.CharField(max_length=64, blank=True, default="")
+    last_notification_seen_at = models.DateTimeField(null=True, blank=True)
+    last_chat_seen_at = models.DateTimeField(null=True, blank=True)
+    last_app_state_change_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen"]
+
+    def __str__(self) -> str:
+        return f"Presence<{self.user.username}>"
+
+    def is_stale(self, stale_after_seconds: int) -> bool:
+        if not self.last_seen:
+            return True
+        return (timezone.now() - self.last_seen).total_seconds() > stale_after_seconds
+
+    def save(self, *args, **kwargs):
+        result = super().save(*args, **kwargs)
+        User.objects.filter(pk=self.user_id).update(
+            is_online=self.is_online,
+            last_seen=self.last_seen or timezone.now(),
+        )
+        return result
+
+
+class UserDevice(models.Model):
+    """Per-device endpoint metadata for push delivery and routing."""
+
+    PLATFORM_ANDROID = "android"
+    PLATFORM_IOS = "ios"
+    PLATFORM_WEB = "web"
+    PLATFORM_UNKNOWN = "unknown"
+    PLATFORM_CHOICES = [
+        (PLATFORM_ANDROID, "Android"),
+        (PLATFORM_IOS, "iOS"),
+        (PLATFORM_WEB, "Web"),
+        (PLATFORM_UNKNOWN, "Unknown"),
+    ]
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="devices"
+    )
+    installation_id = models.CharField(max_length=128, unique=True, db_index=True)
+    expo_push_token = models.CharField(max_length=200, blank=True, default="")
+    platform = models.CharField(
+        max_length=16,
+        choices=PLATFORM_CHOICES,
+        default=PLATFORM_UNKNOWN,
+    )
+    device_name = models.CharField(max_length=120, blank=True, default="")
+    app_version = models.CharField(max_length=32, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen", "-updated_at"]
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["expo_push_token"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Device<{self.user.username}:{self.installation_id}>"
 
 
 class Contact(models.Model):

@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
-from chat.consumers import get_user_notification_channels, get_user_presence_state
+from chat.consumers import decide_call_notification_route, get_user_notification_channels, get_user_routing_state, record_notification_decision
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,8 @@ class IceConfigView(APIView):
     """
 
     def get(self, request):
-        mode = getattr(request.user, 'connectivity_mode', 'auto')
+        profile = getattr(request.user, 'profile', None)
+        mode = getattr(profile, 'connectivity_mode', 'auto')
         config = _build_ice_servers(mode)
         return Response(config)
 
@@ -141,8 +142,22 @@ class InitiateCallView(APIView):
         # Notify callee via WebSocket when at least one notification channel exists.
         # If WS is closed/stale, push is still sent below as the authoritative surface.
         ws_channels = get_user_notification_channels(int(callee_id))
-        callee_presence = get_user_presence_state(int(callee_id))
-        if ws_channels:
+        callee_routing_state = get_user_routing_state(int(callee_id))
+        call_route = decide_call_notification_route(
+            routing_state=callee_routing_state,
+            has_notification_channels=bool(ws_channels),
+        )
+        if call_route == "notif_ws":
+            record_notification_decision(
+                kind="call",
+                route=call_route,
+                correlation_id=f"call:{call.id}",
+                route_reason="notification_ws_available",
+                sender_id=request.user.id,
+                recipient_id=int(callee_id),
+                call_id=str(call.id),
+                routing_state=callee_routing_state,
+            )
             channel_layer = get_channel_layer()
             async_to_sync(channel_layer.group_send)(
                 f"notifications_{callee_id}",
@@ -155,25 +170,37 @@ class InitiateCallView(APIView):
                         "caller_id": request.user.id,
                         "call_type": call_type,
                         "room_name": room_name,
+                        "correlation_id": f"call:{call.id}",
+                        "route_reason": "notif_ws",
                     },
                 },
             )
             call.ws_notified_at = timezone.now()
             logger.info(
-                "[NotifyDecision] kind=call route=notif_ws call_id=%s caller=%s callee=%s presence=%s channels=%d",
+                "[NotifyDecision] kind=call route=notif_ws call_id=%s caller=%s callee=%s state=%s channels=%d",
                 str(call.id),
                 request.user.id,
                 int(callee_id),
-                callee_presence,
+                callee_routing_state,
                 len(ws_channels),
             )
         else:
+            record_notification_decision(
+                kind="call",
+                route=call_route,
+                correlation_id=f"call:{call.id}",
+                route_reason="notification_ws_unavailable",
+                sender_id=request.user.id,
+                recipient_id=int(callee_id),
+                call_id=str(call.id),
+                routing_state=callee_routing_state,
+            )
             logger.info(
-                "[NotifyDecision] kind=call route=ws_unavailable call_id=%s caller=%s callee=%s presence=%s",
+                "[NotifyDecision] kind=call route=ws_unavailable call_id=%s caller=%s callee=%s state=%s",
                 str(call.id),
                 request.user.id,
                 int(callee_id),
-                callee_presence,
+                callee_routing_state,
             )
 
         # Always send push for incoming calls. Presence can be stale and a
@@ -187,6 +214,8 @@ class InitiateCallView(APIView):
             call_id=str(call.id),
             caller_id=request.user.id,
             room_name=room_name,
+            correlation_id=f"call:{call.id}",
+            route_reason="push_initial",
         )
         logger.info(
             "[NotifyDecision] kind=call route=push call_id=%s caller=%s callee=%s sent=%s",
@@ -196,6 +225,16 @@ class InitiateCallView(APIView):
             bool(push_sent),
         )
         if push_sent:
+            record_notification_decision(
+                kind="call",
+                route="push_sent",
+                correlation_id=f"call:{call.id}",
+                route_reason="push_initial_sent",
+                sender_id=request.user.id,
+                recipient_id=int(callee_id),
+                call_id=str(call.id),
+                routing_state=callee_routing_state,
+            )
             call.push_sent_at = timezone.now()
         call.save(update_fields=["ws_notified_at", "push_sent_at"])
 

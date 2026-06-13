@@ -12,6 +12,7 @@ from typing import Optional
 
 import requests
 from django.contrib.auth import get_user_model
+from users.models import UserDevice
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -76,14 +77,17 @@ def send_message_push(
     content: str,
     room_id: str,
     room_name: str,
+    correlation_id: str | None = None,
+    route_reason: str | None = None,
 ) -> bool:
     """Send a push notification for a new chat message."""
     tokens = list(
-        User.objects.filter(
-            id__in=recipient_ids,
-            notif_messages_enabled=True,
+        UserDevice.objects.filter(
+            user_id__in=recipient_ids,
+            is_active=True,
+            user__profile__notif_messages_enabled=True,
             expo_push_token__startswith="ExponentPushToken[",
-        ).values_list("expo_push_token", flat=True)
+        ).values_list("expo_push_token", flat=True).distinct()
     )
     return _send_expo_push(
         push_tokens=tokens,
@@ -93,6 +97,10 @@ def send_message_push(
             "type": "new_message",
             "roomId": room_id,
             "roomName": room_name,
+            "correlationId": correlation_id,
+            "routeReason": route_reason,
+            "correlation_id": correlation_id,
+            "route_reason": route_reason,
         },
         channel_id="messages",
     )
@@ -105,14 +113,17 @@ def send_call_push(
     call_id: str,
     caller_id: int,
     room_name: str,
+    correlation_id: str | None = None,
+    route_reason: str | None = None,
 ) -> bool:
     """Send a push notification for an incoming call."""
     tokens = list(
-        User.objects.filter(
-            id=callee_id,
-            notif_calls_enabled=True,
+        UserDevice.objects.filter(
+            user_id=callee_id,
+            is_active=True,
+            user__profile__notif_calls_enabled=True,
             expo_push_token__startswith="ExponentPushToken[",
-        ).values_list("expo_push_token", flat=True)
+        ).values_list("expo_push_token", flat=True).distinct()
     )
     icon = "📹" if call_type == "video" else "📞"
     return _send_expo_push(
@@ -126,6 +137,10 @@ def send_call_push(
             "callerId": caller_id,
             "callType": call_type,
             "roomName": room_name,
+            "correlationId": correlation_id,
+            "routeReason": route_reason,
+            "correlation_id": correlation_id,
+            "route_reason": route_reason,
         },
         channel_id="calls",
         priority="high",

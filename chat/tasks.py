@@ -63,6 +63,8 @@ def sweep_stale_message_deliveries() -> dict:
             content="New message waiting",
             room_id=room_id_str,
             room_name=room_name,
+            correlation_id=f"msg:{message_id}",
+            route_reason="push_stale_sweep",
         )
 
         if not sent:

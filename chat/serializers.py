@@ -9,11 +9,31 @@ User = get_user_model()
 class MemberSerializer(serializers.ModelSerializer):
     """Lightweight user serializer for room member lists."""
 
-    avatar = serializers.ImageField(read_only=True, use_url=True)
+    avatar = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
+    user_tag = serializers.SerializerMethodField()
+    is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ("id", "username", "display_name", "user_tag", "is_online", "avatar")
+
+    def get_avatar(self, obj: User) -> str | None:
+        profile = getattr(obj, "profile", None)
+        avatar = getattr(profile, "avatar", None)
+        return getattr(avatar, "url", None)
+
+    def get_display_name(self, obj: User) -> str:
+        profile = getattr(obj, "profile", None)
+        return getattr(profile, "display_name", "") or obj.username
+
+    def get_user_tag(self, obj: User) -> str | None:
+        profile = getattr(obj, "profile", None)
+        return getattr(profile, "user_tag", None)
+
+    def get_is_online(self, obj: User) -> bool:
+        presence = getattr(obj, "presence", None)
+        return bool(getattr(presence, "is_online", False))
 
 
 class ChatRoomSerializer(serializers.ModelSerializer):

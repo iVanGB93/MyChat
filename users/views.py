@@ -10,7 +10,7 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from .db_storage import FileBlob
-from .models import BlockedUser, Contact, PendingRegistration
+from .models import BlockedUser, Contact, PendingRegistration, UserDevice
 from .serializers import (
     AccountDeleteSerializer,
     BlockedUserSerializer,
@@ -454,6 +454,11 @@ class LogoutAllSessionsView(APIView):
 
     def post(self, request):
         user = request.user
+        UserDevice.objects.filter(user=user).update(
+            is_active=False,
+            expo_push_token="",
+            last_seen=timezone.now(),
+        )
         user.token_version = (user.token_version or 0) + 1
         user.save(update_fields=["token_version"])
         return Response({"status": "ok", "token_version": user.token_version})
@@ -481,24 +486,81 @@ class RegisterPushTokenView(APIView):
     authenticated user.  The client should call this after every login
     and whenever the token is refreshed.
 
-    POST  { "token": "ExponentPushToken[...]" }
+    POST  {
+      "token": "ExponentPushToken[...]",
+      "installation_id": "uuid",
+      "platform": "android"|"ios"|"web",
+      "device_name": "Pixel 8",
+      "app_version": "1.0.10"
+    }
     """
 
     def post(self, request):
         token = request.data.get("token", "").strip()
+        installation_id = request.data.get("installation_id", "").strip()
+        platform = request.data.get("platform", UserDevice.PLATFORM_UNKNOWN).strip() or UserDevice.PLATFORM_UNKNOWN
+        device_name = request.data.get("device_name", "").strip()
+        app_version = request.data.get("app_version", "").strip()
         if not token:
             return Response(
                 {"error": "token is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not installation_id:
+            return Response(
+                {"error": "installation_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # Clear token from any other user (device switched accounts)
-        User.objects.filter(expo_push_token=token).exclude(id=request.user.id).update(
-            expo_push_token=""
+        if platform not in {choice for choice, _label in UserDevice.PLATFORM_CHOICES}:
+            platform = UserDevice.PLATFORM_UNKNOWN
+
+        # Clear token from any other installation so one push endpoint maps to one device row.
+        UserDevice.objects.filter(expo_push_token=token).exclude(
+            installation_id=installation_id
+        ).update(expo_push_token="", is_active=False)
+
+        UserDevice.objects.update_or_create(
+            installation_id=installation_id,
+            defaults={
+                "user": request.user,
+                "expo_push_token": token,
+                "platform": platform,
+                "device_name": device_name,
+                "app_version": app_version,
+                "is_active": True,
+                "last_seen": timezone.now(),
+            },
+        )
+        return Response({"status": "ok"})
+
+
+class UnregisterPushTokenView(APIView):
+    """Deactivate push delivery for the current installation on logout."""
+
+    def post(self, request):
+        installation_id = request.data.get("installation_id", "").strip()
+        if not installation_id:
+            return Response(
+                {"error": "installation_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        UserDevice.objects.filter(
+            user=request.user,
+            installation_id=installation_id,
+        ).update(
+            is_active=False,
+            expo_push_token="",
+            last_seen=timezone.now(),
         )
 
-        request.user.expo_push_token = token
-        request.user.save(update_fields=["expo_push_token"])
+        has_active_tokens = UserDevice.objects.filter(
+            user=request.user,
+            is_active=True,
+            expo_push_token__startswith="ExponentPushToken[",
+        ).exists()
+
         return Response({"status": "ok"})
 
 
@@ -549,6 +611,8 @@ class PendingNotificationsView(APIView):
                 # content via Expo push at send-time.
                 "content": "New messages waiting",
                 "created_at": pd.created_at.isoformat(),
+                "correlation_id": None,
+                "route_reason": "pending_delivery_poll",
             })
 
         # ---- Active incoming calls (ringing in last 60 seconds) ----
@@ -566,6 +630,8 @@ class PendingNotificationsView(APIView):
                 "caller_id": call.caller_id,
                 "call_type": call.call_type,
                 "room_name": call.room_name,
+                "correlation_id": f"call:{call.id}",
+                "route_reason": "pending_call_poll",
             })
 
         return Response(result)
@@ -603,16 +669,17 @@ class UserSearchView(generics.ListAPIView):
         else:
             tag_guess = normalized
 
-        tag_match = Q(user_tag__iexact=tag_guess)
-        email_match = Q(email__iexact=raw, discoverable_by_email=True)
+        tag_match = Q(profile__user_tag__iexact=tag_guess)
+        email_match = Q(email__iexact=raw, profile__discoverable_by_email=True)
         # Username / display_name partial search is gated on the target's
         # username discoverability preference.
         text_match = (
-            Q(username__icontains=raw) | Q(display_name__icontains=raw)
-        ) & Q(discoverable_by_username=True)
+            Q(username__icontains=raw) | Q(profile__display_name__icontains=raw)
+        ) & Q(profile__discoverable_by_username=True)
 
         return (
             User.objects.filter(tag_match | email_match | text_match)
+            .select_related("profile", "presence")
             .exclude(id=me.id)
             .distinct()[:20]
         )

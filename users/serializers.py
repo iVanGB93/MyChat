@@ -32,6 +32,41 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        profile = getattr(instance, "profile", None)
+        presence = getattr(instance, "presence", None)
+
+        if profile is not None:
+            data["avatar"] = profile.avatar.url if getattr(profile.avatar, "url", None) else None
+            data["bio"] = profile.bio
+            data["display_name"] = profile.display_name
+            data["user_tag"] = profile.user_tag
+            data["discoverable_by_username"] = profile.discoverable_by_username
+            data["discoverable_by_email"] = profile.discoverable_by_email
+            data["connectivity_mode"] = profile.connectivity_mode
+            data["notif_messages_enabled"] = profile.notif_messages_enabled
+            data["notif_calls_enabled"] = profile.notif_calls_enabled
+            data["notif_sound_enabled"] = profile.notif_sound_enabled
+
+        if presence is not None:
+            data["is_online"] = presence.is_online
+            data["last_seen"] = presence.last_seen.isoformat().replace("+00:00", "Z") if presence.last_seen else None
+
+        return data
+    avatar = serializers.ImageField(source="profile.avatar", required=False, allow_null=True)
+    bio = serializers.CharField(source="profile.bio", required=False, allow_blank=True)
+    display_name = serializers.CharField(source="profile.display_name", required=False, allow_blank=True)
+    discoverable_by_username = serializers.BooleanField(source="profile.discoverable_by_username", required=False)
+    discoverable_by_email = serializers.BooleanField(source="profile.discoverable_by_email", required=False)
+    connectivity_mode = serializers.ChoiceField(source="profile.connectivity_mode", choices=User.CONNECTIVITY_CHOICES, required=False)
+    notif_messages_enabled = serializers.BooleanField(source="profile.notif_messages_enabled", required=False)
+    notif_calls_enabled = serializers.BooleanField(source="profile.notif_calls_enabled", required=False)
+    notif_sound_enabled = serializers.BooleanField(source="profile.notif_sound_enabled", required=False)
+    user_tag = serializers.CharField(source="profile.user_tag", read_only=True)
+    is_online = serializers.BooleanField(source="presence.is_online", read_only=True)
+    last_seen = serializers.DateTimeField(source="presence.last_seen", read_only=True)
+
     class Meta:
         model = User
         fields = (
@@ -42,6 +77,20 @@ class UserSerializer(serializers.ModelSerializer):
             "notif_messages_enabled", "notif_calls_enabled", "notif_sound_enabled",
         )
         read_only_fields = ("id", "is_online", "last_seen", "user_tag")
+
+    def update(self, instance: User, validated_data: dict) -> User:
+        profile_data = validated_data.pop("profile", {})
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if profile_data:
+            profile = instance.profile
+            for attr, value in profile_data.items():
+                setattr(profile, attr, value)
+            profile.save()
+        return instance
 
     # ---- Uniqueness checks (case-insensitive) for self-edits ----
     def validate_username(self, value: str) -> str:

@@ -7,6 +7,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from chat.push import send_call_push
+from chat.consumers import record_notification_decision
 
 from .models import CallLog
 
@@ -47,9 +48,20 @@ def sweep_stale_call_invites() -> dict:
             call_id=str(call.id),
             caller_id=call.caller_id,
             room_name=call.room_name,
+            correlation_id=f"call:{call.id}",
+            route_reason="push_retry_sweep",
         )
         if sent:
             CallLog.objects.filter(id=call.id).update(push_sent_at=timezone.now())
+            record_notification_decision(
+                kind="call",
+                route="push_sent",
+                correlation_id=f"call:{call.id}",
+                route_reason="push_retry_sweep",
+                sender_id=call.caller_id,
+                recipient_id=call.callee_id,
+                call_id=str(call.id),
+            )
             resent += 1
             logger.info(
                 "[CallInviteSweep] push resent call_id=%s caller=%s callee=%s",

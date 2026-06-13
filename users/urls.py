@@ -26,6 +26,7 @@ urlpatterns = [
     path("search/", views.UserSearchView.as_view(), name="user-search"),
     # Push notifications
     path("push-token/", views.RegisterPushTokenView.as_view(), name="push-token"),
+    path("push-token/unregister/", views.UnregisterPushTokenView.as_view(), name="push-token-unregister"),
     # Pending notifications (background fetch)
     path("notifications/pending/", views.PendingNotificationsView.as_view(), name="pending-notifications"),
     # Contacts
