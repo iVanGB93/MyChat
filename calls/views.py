@@ -8,6 +8,7 @@ import uuid
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.response import Response
@@ -17,6 +18,7 @@ from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
 from chat.consumers import decide_call_notification_route, get_user_notification_channels, get_user_routing_state, record_notification_decision
+from users.models import UserDevice
 
 
 logger = logging.getLogger(__name__)
@@ -203,32 +205,51 @@ class InitiateCallView(APIView):
                 callee_routing_state,
             )
 
-        # Always send push for incoming calls. Presence can be stale and a
-        # "connected" socket does not guarantee user-visible ringing.
-        # Client notification IDs are call_id-based, so duplicate surfaces are
-        # naturally deduped/updated in place.
-        push_sent = send_call_push(
-            callee_id=callee_id,
-            caller_name=request.user.username,
-            call_type=call_type,
-            call_id=str(call.id),
-            caller_id=request.user.id,
-            room_name=room_name,
-            correlation_id=f"call:{call.id}",
-            route_reason="push_initial",
-        )
-        logger.info(
-            "[NotifyDecision] kind=call route=push call_id=%s caller=%s callee=%s sent=%s",
-            str(call.id),
-            request.user.id,
-            int(callee_id),
-            bool(push_sent),
-        )
+        # Send push for calls only when a call-enabled push token exists.
+        # This avoids noisy "sent=False" logs when the user has no token.
+        call_push_available = UserDevice.objects.filter(
+            user_id=callee_id,
+            is_active=True,
+            user__notif_calls_enabled=True,
+        ).filter(
+            Q(expo_push_token__startswith="ExponentPushToken[")
+            | Q(expo_push_token__startswith="ExpoPushToken[")
+        ).exists()
+
+        push_sent = False
+        if call_push_available:
+            # Presence can be stale and a "connected" socket does not
+            # guarantee user-visible ringing, so we still send push.
+            push_sent = send_call_push(
+                callee_id=callee_id,
+                caller_name=request.user.username,
+                call_type=call_type,
+                call_id=str(call.id),
+                caller_id=request.user.id,
+                room_name=room_name,
+                correlation_id=f"call:{call.id}",
+                route_reason="push_initial",
+            )
+            logger.info(
+                "[NotifyDecision] kind=call route=push call_id=%s caller=%s callee=%s sent=%s",
+                str(call.id),
+                request.user.id,
+                int(callee_id),
+                bool(push_sent),
+            )
+        else:
+            logger.info(
+                "[NotifyDecision] kind=call route=push_skipped call_id=%s caller=%s callee=%s reason=no_call_push_token",
+                str(call.id),
+                request.user.id,
+                int(callee_id),
+            )
+
         if push_sent:
             record_notification_decision(
                 kind="call",
                 route="push_sent",
-                correlation_id=f"call:{call.id}",
+                correlation_id=f"call:%s" % call.id,
                 route_reason="push_initial_sent",
                 sender_id=request.user.id,
                 recipient_id=int(callee_id),

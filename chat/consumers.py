@@ -98,7 +98,16 @@ def get_user_routing_state(user_id: int) -> dict:
     push_available = UserDevice.objects.filter(
         user_id=user_id,
         is_active=True,
-           user__notif_messages_enabled=True,
+        user__notif_messages_enabled=True,
+    ).filter(
+        Q(expo_push_token__startswith="ExponentPushToken[")
+        | Q(expo_push_token__startswith="ExpoPushToken[")
+    ).exists()
+
+    call_push_available = UserDevice.objects.filter(
+        user_id=user_id,
+        is_active=True,
+        user__notif_calls_enabled=True,
     ).filter(
         Q(expo_push_token__startswith="ExponentPushToken[")
         | Q(expo_push_token__startswith="ExpoPushToken[")
@@ -114,6 +123,7 @@ def get_user_routing_state(user_id: int) -> dict:
             "notification_ws_count": 0,
             "active_room_id": "",
             "push_available": push_available,
+            "call_push_available": call_push_available,
             "is_online": False,
             "is_stale": True,
         }
@@ -137,6 +147,7 @@ def get_user_routing_state(user_id: int) -> dict:
         "notification_ws_count": presence.notification_socket_count,
         "active_room_id": presence.active_room_id,
         "push_available": push_available,
+        "call_push_available": call_push_available,
         "is_online": presence.is_online,
         "is_stale": is_stale,
     }
