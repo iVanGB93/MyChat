@@ -108,13 +108,23 @@ def _send_expo_push(
 def send_message_push(
     recipient_ids: list[int],
     sender_name: str,
-    content: str,
+    content: str | None,
     room_id: str,
     room_name: str,
     correlation_id: str | None = None,
     route_reason: str | None = None,
+    message_id: str | None = None,
+    sender_id: int | None = None,
+    message_type: str | None = None,
+    created_at: str | None = None,
+    extra_data: dict | None = None,
 ) -> bool:
-    """Send a push notification for a new chat message."""
+    """Send a push notification for a new chat message.
+
+    When full message fields are provided they are embedded in the push data
+    payload so the recipient app can save the message to its local SQLite DB
+    immediately on push receipt — without waiting for the WS to reconnect.
+    """
     tokens = list(
         UserDevice.objects.filter(
             user_id__in=recipient_ids,
@@ -125,19 +135,46 @@ def send_message_push(
             | Q(expo_push_token__startswith="ExpoPushToken[")
         ).values_list("expo_push_token", flat=True).distinct()
     )
+    display_body = (content or "New message")[:200]
+    data: dict = {
+        "type": "new_message",
+        "roomId": room_id,
+        "room_id": room_id,
+        "roomName": room_name,
+        "room_name": room_name,
+        "correlationId": correlation_id,
+        "routeReason": route_reason,
+        "correlation_id": correlation_id,
+        "route_reason": route_reason,
+    }
+    # Full message payload — lets the app save to SQLite without WS
+    if message_id:
+        data["messageId"] = message_id
+        data["message_id"] = message_id
+    if sender_id is not None:
+        data["senderId"] = str(sender_id)
+        data["sender_id"] = str(sender_id)
+    if sender_name:
+        data["sender"] = sender_name
+    if content:
+        data["content"] = content[:2000]
+    if message_type:
+        data["messageType"] = message_type
+        data["message_type"] = message_type
+    if created_at:
+        data["createdAt"] = created_at
+        data["created_at"] = created_at
+    # Pass through any extra client fields (reply_to, duration_ms, etc.)
+    if extra_data:
+        for k, v in extra_data.items():
+            if k not in data and v is not None:
+                # Expo push data values must be strings
+                data[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
     return _send_expo_push(
         push_tokens=tokens,
         title=sender_name,
-        body=content[:200],
-        data={
-            "type": "new_message",
-            "roomId": room_id,
-            "roomName": room_name,
-            "correlationId": correlation_id,
-            "routeReason": route_reason,
-            "correlation_id": correlation_id,
-            "route_reason": route_reason,
-        },
+        body=display_body,
+        data=data,
         channel_id="messages",
     )
 
@@ -166,8 +203,8 @@ def send_call_push(
     icon = "📹" if call_type == "video" else "📞"
     return _send_expo_push(
         push_tokens=tokens,
-        title=f"{icon} Incoming {call_type} call",
-        body=f"{caller_name} is calling you",
+        title=f"{icon} Incoming {call_type} call from {caller_name}",
+        body=f"Tap to answer or swipe to decline",
         data={
             "type": "incoming_call",
             "callId": call_id,

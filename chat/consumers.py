@@ -808,11 +808,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 sent = await self._send_message_push(
                     recipient_ids=push_recipients,
                     sender_name=self.user.username,
-                    content="New message waiting",
+                    content=message_content,
                     room_id=str(self.room_id),
                     room_name=room_info["name"],
                     correlation_id=f"msg:{message_id}",
                     route_reason="push_initial",
+                    message_id=message_id,
+                    sender_id=self.user.id,
+                    message_type=message_type_str,
+                    created_at=created_at,
+                    extra_data={
+                        k: v for k, v in msg_data.items()
+                        if k not in ("id", "sender", "sender_id", "content",
+                                     "message_type", "created_at",
+                                     "correlation_id", "route_reason")
+                    },
                 )
                 if sent:
                     await self.mark_push_sent(message_id, push_recipients)
@@ -1005,7 +1015,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def _send_message_push(
-        self, recipient_ids, sender_name, content, room_id, room_name, correlation_id=None, route_reason=None
+        self,
+        recipient_ids,
+        sender_name,
+        content,
+        room_id,
+        room_name,
+        correlation_id=None,
+        route_reason=None,
+        message_id=None,
+        sender_id=None,
+        message_type=None,
+        created_at=None,
+        extra_data=None,
     ):
         """Send Expo push notification for a new message (runs in thread)."""
         return send_message_push(
@@ -1016,6 +1038,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             room_name=room_name,
             correlation_id=correlation_id,
             route_reason=route_reason,
+            message_id=message_id,
+            sender_id=sender_id,
+            message_type=message_type,
+            created_at=created_at,
+            extra_data=extra_data,
         )
 
     async def push_fallback_after_timeout(self, message_id: str, sender_name: str, room_name: str):
@@ -1026,11 +1053,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         sent = await self._send_message_push(
             recipient_ids=pending_recipient_ids,
             sender_name=sender_name,
-            content="New message waiting",
+            content=None,  # content not available at fallback time
             room_id=str(self.room_id),
             room_name=room_name,
             correlation_id=f"msg:{message_id}",
             route_reason="push_fallback_timeout",
+            message_id=message_id,
         )
         if sent:
             await self.mark_push_sent(message_id, pending_recipient_ids)
