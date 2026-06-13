@@ -129,7 +129,7 @@ def send_message_push(
         UserDevice.objects.filter(
             user_id__in=recipient_ids,
             is_active=True,
-            user__profile__notif_messages_enabled=True,
+               user__notif_messages_enabled=True,
         ).filter(
             Q(expo_push_token__startswith="ExponentPushToken[")
             | Q(expo_push_token__startswith="ExpoPushToken[")
@@ -194,7 +194,7 @@ def send_call_push(
         UserDevice.objects.filter(
             user_id=callee_id,
             is_active=True,
-            user__profile__notif_calls_enabled=True,
+               user__notif_calls_enabled=True,
         ).filter(
             Q(expo_push_token__startswith="ExponentPushToken[")
             | Q(expo_push_token__startswith="ExpoPushToken[")

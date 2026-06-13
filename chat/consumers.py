@@ -98,7 +98,7 @@ def get_user_routing_state(user_id: int) -> dict:
     push_available = UserDevice.objects.filter(
         user_id=user_id,
         is_active=True,
-        user__profile__notif_messages_enabled=True,
+           user__notif_messages_enabled=True,
     ).filter(
         Q(expo_push_token__startswith="ExponentPushToken[")
         | Q(expo_push_token__startswith="ExpoPushToken[")
