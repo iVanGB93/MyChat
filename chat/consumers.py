@@ -146,6 +146,14 @@ def decide_message_notification_route(room_id: str, routing_state: dict, in_room
         and routing_state["active_room_id"] == str(room_id)
     ):
         return "room_ws_active"
+    # Background sessions are not reliable for user-visible alerts on mobile.
+    # Prefer remote push so off-screen users still get an OS-level notification.
+    if routing_state["presence"] == "background":
+        if routing_state["push_available"]:
+            return "push_initial"
+        if has_notification_channels and routing_state["notification_ws_connected"] and not routing_state["is_stale"]:
+            return "notif_ws"
+        return "pending_only"
     if has_notification_channels and routing_state["notification_ws_connected"] and not routing_state["is_stale"]:
         return "notif_ws"
     if routing_state["push_available"]:
@@ -658,6 +666,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 # notification — and the per-socket chat_message handler below
                 # suppresses the in-app delivery to that backgrounded socket.
                 if route == "room_ws_active":
+                    await self.mark_message_delivery_routed(
+                        message_id=message_id,
+                        recipient_id=member_id,
+                        routed_via=MessageDelivery.ROUTE_CHAT_WS,
+                    )
                     record_notification_decision(
                         kind="message",
                         route=route,
@@ -679,6 +692,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     continue
 
                 if route == "notif_ws":
+                    await self.mark_message_delivery_routed(
+                        message_id=message_id,
+                        recipient_id=member_id,
+                        routed_via=MessageDelivery.ROUTE_NOTIF_WS,
+                    )
                     record_notification_decision(
                         kind="message",
                         route=route,
@@ -729,6 +747,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         )
                 elif route == "push_initial":
                     # Offline but push-capable — keep a pending marker and queue push.
+                    await self.mark_message_delivery_routed(
+                        message_id=message_id,
+                        recipient_id=member_id,
+                        routed_via=MessageDelivery.ROUTE_PUSH,
+                    )
                     record_notification_decision(
                         kind="message",
                         route=route,
@@ -749,6 +772,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     )
                     push_recipients.append(member_id)
                 else:
+                    await self.mark_message_delivery_routed(
+                        message_id=message_id,
+                        recipient_id=member_id,
+                        routed_via=MessageDelivery.ROUTE_PENDING_ONLY,
+                    )
                     record_notification_decision(
                         kind="message",
                         route=route,
@@ -1034,6 +1062,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
 
     @database_sync_to_async
+    def mark_message_delivery_routed(self, message_id: str, recipient_id: int, routed_via: str) -> None:
+        MessageDelivery.objects.filter(
+            room_id=self.room_id,
+            message_id=message_id,
+            sender_id=self.user.id,
+            recipient_id=recipient_id,
+        ).update(
+            routed_via=routed_via,
+            routed_at=timezone.now(),
+        )
+
+    @database_sync_to_async
     def mark_message_delivery_acked(self, message_id: str, sender_id: int, room_id: str) -> bool:
         now = timezone.now()
         updated = MessageDelivery.objects.filter(
@@ -1081,7 +1121,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             room_id=self.room_id,
             message_id=message_id,
             recipient_id__in=recipient_ids,
-        ).update(push_sent_at=timezone.now())
+        ).update(
+            push_sent_at=timezone.now(),
+            routed_via=MessageDelivery.ROUTE_PUSH,
+            routed_at=timezone.now(),
+        )
 
     @database_sync_to_async
     def get_user_routing_snapshot(self, user_id: int) -> dict:

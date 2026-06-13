@@ -70,6 +70,18 @@ class MessageDelivery(models.Model):
         (STATUS_PENDING, "Pending"),
         (STATUS_DELIVERED, "Delivered"),
     ]
+    ROUTE_UNKNOWN = "unknown"
+    ROUTE_CHAT_WS = "chat_ws"
+    ROUTE_NOTIF_WS = "notif_ws"
+    ROUTE_PUSH = "push"
+    ROUTE_PENDING_ONLY = "pending_only"
+    ROUTE_CHOICES = [
+        (ROUTE_UNKNOWN, "Unknown"),
+        (ROUTE_CHAT_WS, "Chat WS"),
+        (ROUTE_NOTIF_WS, "Notification WS"),
+        (ROUTE_PUSH, "Push"),
+        (ROUTE_PENDING_ONLY, "Pending Only"),
+    ]
 
     room = models.ForeignKey(
         ChatRoom, on_delete=models.CASCADE, related_name="message_deliveries"
@@ -91,6 +103,12 @@ class MessageDelivery(models.Model):
         default=STATUS_PENDING,
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    routed_at = models.DateTimeField(null=True, blank=True)
+    routed_via = models.CharField(
+        max_length=24,
+        choices=ROUTE_CHOICES,
+        default=ROUTE_UNKNOWN,
+    )
     delivered_at = models.DateTimeField(null=True, blank=True)
     push_sent_at = models.DateTimeField(null=True, blank=True)
 
