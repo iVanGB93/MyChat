@@ -644,7 +644,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 await self.create_message_delivery(message_id, member_id)
                 await self.create_pending_delivery(member_id)
                 tracked_delivery_count += 1
-                routing_state = await self.get_user_routing_state(member_id)
+                routing_state = await self.get_user_routing_snapshot(member_id)
                 member_channels = get_user_notification_channels(member_id)
                 route = decide_message_notification_route(
                     room_id=str(self.room_id),
@@ -842,7 +842,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 if await self._is_sender_blocked_by_me(sender_id):
                     return
             if sender_id != self.user.id \
-                    and not is_user_online(self.user.id):
+                    and not await self._is_user_online_async(self.user.id):
                 return
             await self.send(text_data=json.dumps(event["message"]))
         except Exception:
@@ -1082,6 +1082,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
             message_id=message_id,
             recipient_id__in=recipient_ids,
         ).update(push_sent_at=timezone.now())
+
+    @database_sync_to_async
+    def get_user_routing_snapshot(self, user_id: int) -> dict:
+        return get_user_routing_state(user_id)
+
+    @database_sync_to_async
+    def _is_user_online_async(self, user_id: int) -> bool:
+        return is_user_online(user_id)
 
     @database_sync_to_async
     def get_blockers_of_sender(self) -> set[int]:
