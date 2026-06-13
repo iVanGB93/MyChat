@@ -1,3 +1,5 @@
+import hashlib
+
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.http import Http404, HttpResponse
@@ -506,11 +508,11 @@ class RegisterPushTokenView(APIView):
                 {"error": "token is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Fall back to a stable installation id derived from the token so that
+        # older/minimal clients that only send {token} still register a device
+        # row instead of being silently dropped (which left push delivery dead).
         if not installation_id:
-            return Response(
-                {"error": "installation_id is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            installation_id = "token-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
 
         if platform not in {choice for choice, _label in UserDevice.PLATFORM_CHOICES}:
             platform = UserDevice.PLATFORM_UNKNOWN
