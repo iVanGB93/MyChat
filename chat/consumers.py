@@ -11,6 +11,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
@@ -97,7 +98,10 @@ def get_user_routing_state(user_id: int) -> dict:
     push_available = UserDevice.objects.filter(
         user_id=user_id,
         is_active=True,
-        expo_push_token__startswith="ExponentPushToken[",
+        user__profile__notif_messages_enabled=True,
+    ).filter(
+        Q(expo_push_token__startswith="ExponentPushToken[")
+        | Q(expo_push_token__startswith="ExpoPushToken[")
     ).exists()
 
     if presence is None:

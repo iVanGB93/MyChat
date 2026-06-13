@@ -9,6 +9,7 @@ from urllib.parse import quote
 from django.contrib.auth import get_user_model
 from django.contrib.admin.views.decorators import staff_member_required
 from django.conf import settings
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -93,7 +94,9 @@ def monitor_api(request):
 
     users_with_push = User.objects.filter(
         devices__is_active=True,
-        devices__expo_push_token__startswith="ExponentPushToken[",
+    ).filter(
+        Q(devices__expo_push_token__startswith="ExponentPushToken[")
+        | Q(devices__expo_push_token__startswith="ExpoPushToken[")
     ).distinct().count()
 
     # ── WebSocket connections (in-memory) ──

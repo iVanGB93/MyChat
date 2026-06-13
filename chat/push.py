@@ -12,12 +12,20 @@ from typing import Optional
 
 import requests
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from users.models import UserDevice
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+
+def _is_expo_push_token(token: str) -> bool:
+    return bool(token) and (
+        token.startswith("ExponentPushToken[")
+        or token.startswith("ExpoPushToken[")
+    )
 
 
 def _send_expo_push(
@@ -38,7 +46,7 @@ def _send_expo_push(
 
     messages = []
     for token in push_tokens:
-        if not token or not token.startswith("ExponentPushToken["):
+        if not _is_expo_push_token(token):
             continue
         messages.append({
             "to": token,
@@ -64,8 +72,34 @@ def _send_expo_push(
             timeout=10,
         )
         resp.raise_for_status()
-        logger.info("[ExpoPush] sent %d notification(s), status=%d", len(messages), resp.status_code)
-        return True
+        payload = resp.json() if resp.content else {}
+        ticket_rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(ticket_rows, list):
+            logger.info("[ExpoPush] sent %d notification(s), status=%d", len(messages), resp.status_code)
+            return True
+
+        accepted = 0
+        errors = 0
+        for row in ticket_rows:
+            if isinstance(row, dict) and row.get("status") == "ok":
+                accepted += 1
+            else:
+                errors += 1
+
+        if errors:
+            logger.warning(
+                "[ExpoPush] ticket errors accepted=%d errors=%d payload=%s",
+                accepted,
+                errors,
+                payload,
+            )
+        else:
+            logger.info(
+                "[ExpoPush] sent %d notification(s), accepted=%d",
+                len(messages),
+                accepted,
+            )
+        return accepted > 0
     except Exception as exc:
         logger.warning("[ExpoPush] failed to send: %s", exc)
         return False
@@ -86,7 +120,9 @@ def send_message_push(
             user_id__in=recipient_ids,
             is_active=True,
             user__profile__notif_messages_enabled=True,
-            expo_push_token__startswith="ExponentPushToken[",
+        ).filter(
+            Q(expo_push_token__startswith="ExponentPushToken[")
+            | Q(expo_push_token__startswith="ExpoPushToken[")
         ).values_list("expo_push_token", flat=True).distinct()
     )
     return _send_expo_push(
@@ -122,7 +158,9 @@ def send_call_push(
             user_id=callee_id,
             is_active=True,
             user__profile__notif_calls_enabled=True,
-            expo_push_token__startswith="ExponentPushToken[",
+        ).filter(
+            Q(expo_push_token__startswith="ExponentPushToken[")
+            | Q(expo_push_token__startswith="ExpoPushToken[")
         ).values_list("expo_push_token", flat=True).distinct()
     )
     icon = "📹" if call_type == "video" else "📞"

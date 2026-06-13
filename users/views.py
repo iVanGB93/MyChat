@@ -560,7 +560,9 @@ class UnregisterPushTokenView(APIView):
         has_active_tokens = UserDevice.objects.filter(
             user=request.user,
             is_active=True,
-            expo_push_token__startswith="ExponentPushToken[",
+        ).filter(
+            Q(expo_push_token__startswith="ExponentPushToken[")
+            | Q(expo_push_token__startswith="ExpoPushToken[")
         ).exists()
 
         return Response({"status": "ok"})
