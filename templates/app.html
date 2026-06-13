@@ -723,7 +723,9 @@
 
         container.innerHTML = contacts.map(c => {
             const u = c.contact_detail;
-            const initial = u.username[0].toUpperCase();
+            const label = u.display_name || u.username;
+            const initial = label[0].toUpperCase();
+            const preview = u.user_tag || (u.is_online ? 'Online' : 'Offline');
             return `
                 <div class="contact-item">
                     <div style="position:relative;">
@@ -731,13 +733,13 @@
                         <span class="online-dot ${u.is_online ? 'on' : 'off'}"></span>
                     </div>
                     <div class="item-info">
-                        <div class="name">${u.username}</div>
-                        <div class="preview">${u.is_online ? 'Online' : 'Offline'}</div>
+                        <div class="name">${label}</div>
+                        <div class="preview">${preview}</div>
                     </div>
                     <div class="item-actions">
                         <button class="icon-btn chat-btn" onclick="openDirectChat(${u.id})" title="Chat">💬</button>
-                        <button class="icon-btn voice-btn" onclick="makeCall(${u.id}, '${u.username}', 'voice')" title="Voice call">📞</button>
-                        <button class="icon-btn video-btn" onclick="makeCall(${u.id}, '${u.username}', 'video')" title="Video call">📹</button>
+                        <button class="icon-btn voice-btn" onclick="makeCall(${u.id}, '${label}', 'voice')" title="Voice call">📞</button>
+                        <button class="icon-btn video-btn" onclick="makeCall(${u.id}, '${label}', 'video')" title="Video call">📹</button>
                     </div>
                 </div>
             `;
@@ -762,7 +764,7 @@
         container.innerHTML = rooms.map(r => {
             const members = (r.members_detail || []).filter(m => m.username !== username);
             const displayName = r.room_type === 'direct'
-                ? (members[0]?.username || 'Chat')
+                ? (members[0]?.display_name || members[0]?.username || 'Chat')
                 : (r.name || 'Group');
             const initial = displayName[0].toUpperCase();
             const preview = r.last_message
@@ -828,9 +830,9 @@
         let displayName, chatPeerId, chatPeerName;
 
         if (roomData.room_type === 'direct') {
-            displayName = otherMembers[0]?.username || 'Chat';
+            displayName = otherMembers[0]?.display_name || otherMembers[0]?.username || 'Chat';
             chatPeerId = otherMembers[0]?.id;
-            chatPeerName = otherMembers[0]?.username;
+            chatPeerName = otherMembers[0]?.display_name || otherMembers[0]?.username;
         } else {
             displayName = roomData.name || 'Group Chat';
             chatPeerId = null;
@@ -842,7 +844,7 @@
 
         // Member badges
         document.getElementById('member-badges').innerHTML = members.map(m =>
-            `<span class="member-badge"><span class="dot ${m.is_online ? 'on' : 'off'}"></span>${m.username}</span>`
+            `<span class="member-badge"><span class="dot ${m.is_online ? 'on' : 'off'}"></span>${m.display_name || m.username}${m.user_tag ? ` · ${m.user_tag}` : ''}</span>`
         ).join('');
 
         // Show call buttons for direct chats

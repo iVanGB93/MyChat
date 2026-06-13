@@ -109,6 +109,33 @@
     color: var(--text-muted);
   }
   .refresh-info .tick { color: var(--success); }
+  .clickable-user { cursor: pointer; color: var(--primary); font-weight: 600; }
+  .clickable-user:hover { text-decoration: underline; }
+  .inspector-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .inspector-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .inspector-card .key {
+    font-size: .72rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    margin-bottom: 6px;
+  }
+  .inspector-card .val {
+    font-size: 1rem;
+    font-weight: 600;
+    word-break: break-word;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; }
 
   /* Empty state */
   .empty { color: var(--text-muted); font-style: italic; padding: 12px; }
@@ -321,6 +348,34 @@
     <div class="empty" id="chatRoomsEmpty" style="display:none;">No active chat rooms</div>
   </div>
 
+  <div class="section">
+    <div class="section-title">
+      Routing Inspector <span class="badge" id="routingInspectorBadge" style="background:var(--accent);">Idle</span>
+    </div>
+    <div class="subtitle" style="margin-bottom:12px;">Click a user in the Online or Connected tables to inspect backend routing state, active devices, and recent notification decisions.</div>
+    <div class="empty" id="routingInspectorEmpty">No user selected.</div>
+    <div id="routingInspector" style="display:none;">
+      <div class="inspector-grid" id="routingInspectorCards"></div>
+      <div class="section-title" style="font-size:1rem; margin-top:12px;">
+        Recent Decisions <span class="badge" id="routingDecisionsBadge">0</span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Kind</th>
+            <th>Route</th>
+            <th>Reason</th>
+            <th>Correlation</th>
+            <th>Context</th>
+          </tr>
+        </thead>
+        <tbody id="routingDecisionsBody"></tbody>
+      </table>
+      <div class="empty" id="routingDecisionsEmpty" style="display:none;">No recent decisions for this user.</div>
+    </div>
+  </div>
+
   <!-- Recent Messages -->
   <div class="section">
     <div class="section-title">
@@ -374,7 +429,9 @@
 
 <script>
 const API = '/api/monitor/';
+const ROUTING_API_BASE = '/api/monitor/routing/';
 const INTERVAL = 3000;
+let selectedRoutingUserId = null;
 
 function timeAgo(iso) {
   if (!iso) return '—';
@@ -436,6 +493,64 @@ function statusDot(color) {
   return `<span class="dot ${color}"></span>`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+async function loadRoutingInspector(userId) {
+  selectedRoutingUserId = userId;
+  setVal('routingInspectorBadge', `User ${userId}`);
+  try {
+    const res = await fetch(`${ROUTING_API_BASE}${userId}/`);
+    if (!res.ok) throw new Error(`routing inspector ${res.status}`);
+    const data = await res.json();
+    document.getElementById('routingInspectorEmpty').style.display = 'none';
+    document.getElementById('routingInspector').style.display = 'block';
+
+    const cards = [
+      ['User', `${data.user.display_name} (@${data.user.username})`],
+      ['Presence', data.routing_state.presence],
+      ['App State', data.routing_state.app_state],
+      ['Chat WS', `${data.routing_state.chat_ws_connected ? 'yes' : 'no'} (${data.routing_state.chat_ws_count})`],
+      ['Notif WS', `${data.routing_state.notification_ws_connected ? 'yes' : 'no'} (${data.routing_state.notification_ws_count})`],
+      ['Push Available', data.routing_state.push_available ? 'yes' : 'no'],
+      ['Active Room', data.routing_state.active_room_id || '—'],
+      ['Devices', String(data.device_count)],
+    ];
+    document.getElementById('routingInspectorCards').innerHTML = cards.map(([k, v]) => `
+      <div class="inspector-card">
+        <div class="key">${escapeHtml(k)}</div>
+        <div class="val ${k === 'Active Room' ? 'mono' : ''}">${escapeHtml(v)}</div>
+      </div>
+    `).join('');
+
+    const decisions = data.recent_decisions || [];
+    setVal('routingDecisionsBadge', decisions.length);
+    renderTable('routingDecisionsBody', 'routingDecisionsEmpty', decisions, row => {
+      const context = row.call_id
+        ? `call ${row.call_id}`
+        : row.room_id
+          ? `room ${row.room_id}`
+          : '—';
+      return `<tr>
+        <td>${timeAgo(row.at)}</td>
+        <td>${escapeHtml(row.kind)}</td>
+        <td>${escapeHtml(row.route)}</td>
+        <td>${escapeHtml(row.route_reason)}</td>
+        <td class="mono">${escapeHtml(row.correlation_id)}</td>
+        <td class="mono">${escapeHtml(context)}</td>
+      </tr>`;
+    });
+  } catch (err) {
+    console.error('Routing inspector error:', err);
+  }
+}
+
 async function refresh() {
   try {
     const res = await fetch(API);
@@ -472,7 +587,7 @@ async function refresh() {
     renderTable('onlineBody', 'onlineEmpty', d.websockets.online_users, u =>
       `<tr>
         <td>${statusDot('green')}</td>
-        <td><strong>${u.username}</strong></td>
+        <td><span class="clickable-user" onclick="loadRoutingInspector(${u.user_id})">${escapeHtml(u.username)}</span></td>
         <td>${timeAgo(u.connected_at)}</td>
         <td>${u.connections}</td>
       </tr>`
@@ -482,7 +597,7 @@ async function refresh() {
     renderTable('bgBody', 'bgEmpty', d.websockets.background_users, u =>
       `<tr>
         <td>${statusDot('purple')}</td>
-        <td><strong>${u.username}</strong></td>
+        <td><span class="clickable-user" onclick="loadRoutingInspector(${u.user_id})">${escapeHtml(u.username)}</span></td>
         <td>${timeAgo(u.connected_at)}</td>
         <td>${u.connections}</td>
       </tr>`
@@ -600,6 +715,9 @@ async function refresh() {
 
     // Last update
     setVal('lastUpdate', new Date().toLocaleTimeString());
+    if (selectedRoutingUserId) {
+      loadRoutingInspector(selectedRoutingUserId);
+    }
 
   } catch (err) {
     console.error('Monitor fetch error:', err);
