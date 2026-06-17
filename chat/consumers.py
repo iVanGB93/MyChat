@@ -1070,6 +1070,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             correlation_id=f"msg:{message_id}",
             route_reason="push_fallback_timeout",
             message_id=message_id,
+            sender_id=self.user.id,
         )
         if sent:
             await self.mark_push_sent(message_id, pending_recipient_ids)

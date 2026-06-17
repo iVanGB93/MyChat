@@ -36,10 +36,16 @@ def _send_expo_push(
     channel_id: str = "messages",
     priority: str = "high",
     sound: str = "default",
+    data_only: bool = False,
 ) -> bool:
     """
     Send a push notification to one or more Expo push tokens.
     Silently fails on errors (fire-and-forget for real-time notifications).
+
+    When ``data_only`` is True we omit title/body so the OS does NOT auto-display
+    a notification. The app's background receive task then renders a single
+    grouped (WhatsApp-style) notification per conversation. Used for Android,
+    which reliably wakes the JS receive task for high-priority FCM data messages.
     """
     if not push_tokens:
         return False
@@ -48,15 +54,25 @@ def _send_expo_push(
     for token in push_tokens:
         if not _is_expo_push_token(token):
             continue
-        messages.append({
-            "to": token,
-            "title": title,
-            "body": body,
-            "data": data or {},
-            "channelId": channel_id,
-            "priority": priority,
-            "sound": sound,
-        })
+        if data_only:
+            messages.append({
+                "to": token,
+                "data": data or {},
+                "channelId": channel_id,
+                "priority": "high",
+                # iOS background wake hint; ignored (harmless) on Android.
+                "_contentAvailable": True,
+            })
+        else:
+            messages.append({
+                "to": token,
+                "title": title,
+                "body": body,
+                "data": data or {},
+                "channelId": channel_id,
+                "priority": priority,
+                "sound": sound,
+            })
 
     if not messages:
         return False
@@ -125,16 +141,22 @@ def send_message_push(
     payload so the recipient app can save the message to its local SQLite DB
     immediately on push receipt — without waiting for the WS to reconnect.
     """
-    tokens = list(
+    device_rows = list(
         UserDevice.objects.filter(
             user_id__in=recipient_ids,
             is_active=True,
-               user__notif_messages_enabled=True,
+            user__notif_messages_enabled=True,
         ).filter(
             Q(expo_push_token__startswith="ExponentPushToken[")
             | Q(expo_push_token__startswith="ExpoPushToken[")
-        ).values_list("expo_push_token", flat=True).distinct()
+        ).values_list("expo_push_token", "platform").distinct()
     )
+    # Android wakes the JS receive task reliably for high-priority data
+    # messages, so we send Android devices a data-only push and let the app
+    # render a single grouped (WhatsApp-style) notification per conversation.
+    # Other platforms keep the OS-rendered notification for reliable display.
+    android_tokens = [t for (t, p) in device_rows if p == UserDevice.PLATFORM_ANDROID]
+    other_tokens = [t for (t, p) in device_rows if p != UserDevice.PLATFORM_ANDROID]
     display_body = (content or "New message")[:200]
     data: dict = {
         "type": "new_message",
@@ -164,19 +186,53 @@ def send_message_push(
     if created_at:
         data["createdAt"] = created_at
         data["created_at"] = created_at
-    # Pass through any extra client fields (reply_to, duration_ms, etc.)
+    # Pass through any extra client fields (reply_to, duration_ms, etc.).
+    #
+    # CRITICAL: Expo limits the push *data* payload to ~4KB. If we exceed it the
+    # payload gets truncated and trailing fields (messageId, content, ...) are
+    # silently dropped — the recipient then can't save the message or send a
+    # delivery ACK, so the sender's tick stays "pending" forever. Voice/image
+    # messages carry large base64 blobs (audio_b64/image_b64) in the client
+    # fields, so we must never forward those (or any oversized value) in the
+    # push. The recipient hydrates media over the WS once it reconnects.
     if extra_data:
+        # Known large/binary fields that must never ride in a push payload.
+        _PUSH_BLOCKED_KEYS = {
+            "audio_b64", "image_b64", "video_b64", "file_b64",
+            "audio", "image", "video", "file", "thumbnail_b64", "waveform",
+        }
+        _MAX_FIELD_LEN = 500  # chars; anything longer is dropped from the push
         for k, v in extra_data.items():
-            if k not in data and v is not None:
-                # Expo push data values must be strings
-                data[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
-    return _send_expo_push(
-        push_tokens=tokens,
-        title=sender_name,
-        body=display_body,
-        data=data,
-        channel_id="messages",
-    )
+            if k in data or v is None or k in _PUSH_BLOCKED_KEYS:
+                continue
+            # Expo push data values must be strings
+            sv = v if isinstance(v, (str, int, float, bool)) else str(v)
+            if isinstance(sv, str) and len(sv) > _MAX_FIELD_LEN:
+                # Skip oversized values to keep the payload under Expo's limit.
+                continue
+            data[k] = sv
+    sent_any = False
+    if android_tokens:
+        # `display: local` tells the app to render the grouped notification
+        # itself (the data-only push shows nothing on its own).
+        android_data = {**data, "display": "local"}
+        sent_any = _send_expo_push(
+            push_tokens=android_tokens,
+            title="",
+            body="",
+            data=android_data,
+            channel_id="messages",
+            data_only=True,
+        ) or sent_any
+    if other_tokens:
+        sent_any = _send_expo_push(
+            push_tokens=other_tokens,
+            title=sender_name,
+            body=display_body,
+            data=data,
+            channel_id="messages",
+        ) or sent_any
+    return sent_any
 
 
 def send_call_push(
