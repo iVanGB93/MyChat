@@ -9,4 +9,5 @@ router.register(r"rooms", views.ChatRoomViewSet, basename="chatroom")
 urlpatterns = [
     path("", include(router.urls)),
     path("messages/ack/", views.ack_message_delivery, name="ack-message-delivery"),
+    path("messages/delivery-status/", views.message_delivery_status, name="message-delivery-status"),
 ]

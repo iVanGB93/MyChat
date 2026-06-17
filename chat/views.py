@@ -207,27 +207,27 @@ def ack_message_delivery(request):
         try:
             from .consumers import get_user_notification_channels
             from channels.layers import get_channel_layer
-            import asyncio
-            
+            from asgiref.sync import async_to_sync
+
             channel_layer = get_channel_layer()
             sender_channels = get_user_notification_channels(sender_id)
             if sender_channels:
-                # Schedule notification asynchronously
+                # This is a synchronous view, so there is no running event loop.
+                # Use async_to_sync to push onto the channel layer (asyncio.create_task
+                # would raise "no running event loop" and silently drop the ack).
                 for channel in sender_channels:
-                    asyncio.create_task(
-                        channel_layer.send(
-                            channel,
-                            {
-                                "type": "notify",
-                                "payload": {
-                                    "event": "message_delivery_ack",
-                                    "message_id": message_id,
-                                    "by_user_id": request.user.id,
-                                    "by_username": request.user.username,
-                                    "room_id": str(room_id),
-                                },
+                    async_to_sync(channel_layer.send)(
+                        channel,
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "message_delivery_ack",
+                                "message_id": message_id,
+                                "by_user_id": request.user.id,
+                                "by_username": request.user.username,
+                                "room_id": str(room_id),
                             },
-                        )
+                        },
                     )
         except Exception as e:
             # Sender notification is nice-to-have; don't fail the ack if it breaks
@@ -251,4 +251,53 @@ def ack_message_delivery(request):
             {"error": "internal server error", "status": "error"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+# ---- Delivery status reconciliation endpoint ----
+# Called by the sender on reconnect/foreground to catch up on delivery ticks
+# for messages that were acked by the recipient while the sender was offline
+# (and therefore missed the real-time message_delivery_ack WS event).
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def message_delivery_status(request):
+    """Return delivery status for a batch of messages sent by the current user.
+
+    Request body:
+    {
+        "message_ids": [str, ...]   # IDs of locally-pending sent messages
+    }
+
+    Response: 200 OK
+    {
+        "delivered": [
+            { "message_id": str, "recipient_id": int, "delivered_at": iso|null }
+        ]
+    }
+
+    Only messages where the requesting user is the sender are returned, so a
+    caller can never probe delivery state for messages they didn't send.
+    """
+    message_ids = request.data.get("message_ids") or []
+    if not isinstance(message_ids, list) or not message_ids:
+        return Response({"delivered": []}, status=status.HTTP_200_OK)
+
+    # Cap batch size to avoid abuse / oversized queries.
+    message_ids = [str(m) for m in message_ids[:500]]
+
+    rows = MessageDelivery.objects.filter(
+        sender_id=request.user.id,
+        message_id__in=message_ids,
+        status=MessageDelivery.STATUS_DELIVERED,
+    ).values("message_id", "recipient_id", "delivered_at")
+
+    delivered = [
+        {
+            "message_id": row["message_id"],
+            "recipient_id": row["recipient_id"],
+            "delivered_at": row["delivered_at"].isoformat() if row["delivered_at"] else None,
+        }
+        for row in rows
+    ]
+    return Response({"delivered": delivered}, status=status.HTTP_200_OK)
+
 
