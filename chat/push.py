@@ -36,16 +36,10 @@ def _send_expo_push(
     channel_id: str = "messages",
     priority: str = "high",
     sound: str = "default",
-    data_only: bool = False,
 ) -> bool:
     """
     Send a push notification to one or more Expo push tokens.
     Silently fails on errors (fire-and-forget for real-time notifications).
-
-    When ``data_only`` is True we omit title/body so the OS does NOT auto-display
-    a notification. The app's background receive task then renders a single
-    grouped (WhatsApp-style) notification per conversation. Used for Android,
-    which reliably wakes the JS receive task for high-priority FCM data messages.
     """
     if not push_tokens:
         return False
@@ -54,25 +48,15 @@ def _send_expo_push(
     for token in push_tokens:
         if not _is_expo_push_token(token):
             continue
-        if data_only:
-            messages.append({
-                "to": token,
-                "data": data or {},
-                "channelId": channel_id,
-                "priority": "high",
-                # iOS background wake hint; ignored (harmless) on Android.
-                "_contentAvailable": True,
-            })
-        else:
-            messages.append({
-                "to": token,
-                "title": title,
-                "body": body,
-                "data": data or {},
-                "channelId": channel_id,
-                "priority": priority,
-                "sound": sound,
-            })
+        messages.append({
+            "to": token,
+            "title": title,
+            "body": body,
+            "data": data or {},
+            "channelId": channel_id,
+            "priority": priority,
+            "sound": sound,
+        })
 
     if not messages:
         return False
@@ -151,12 +135,7 @@ def send_message_push(
             | Q(expo_push_token__startswith="ExpoPushToken[")
         ).values_list("expo_push_token", "platform").distinct()
     )
-    # Android wakes the JS receive task reliably for high-priority data
-    # messages, so we send Android devices a data-only push and let the app
-    # render a single grouped (WhatsApp-style) notification per conversation.
-    # Other platforms keep the OS-rendered notification for reliable display.
-    android_tokens = [t for (t, p) in device_rows if p == UserDevice.PLATFORM_ANDROID]
-    other_tokens = [t for (t, p) in device_rows if p != UserDevice.PLATFORM_ANDROID]
+    tokens = [t for (t, _p) in device_rows]
     display_body = (content or "New message")[:200]
     data: dict = {
         "type": "new_message",
@@ -211,28 +190,18 @@ def send_message_push(
                 # Skip oversized values to keep the payload under Expo's limit.
                 continue
             data[k] = sv
-    sent_any = False
-    if android_tokens:
-        # `display: local` tells the app to render the grouped notification
-        # itself (the data-only push shows nothing on its own).
-        android_data = {**data, "display": "local"}
-        sent_any = _send_expo_push(
-            push_tokens=android_tokens,
-            title="",
-            body="",
-            data=android_data,
-            channel_id="messages",
-            data_only=True,
-        ) or sent_any
-    if other_tokens:
-        sent_any = _send_expo_push(
-            push_tokens=other_tokens,
-            title=sender_name,
-            body=display_body,
-            data=data,
-            channel_id="messages",
-        ) or sent_any
-    return sent_any
+    # Notification-style push: the OS renders it with the real sender + content,
+    # which is reliable even when the app is fully killed. (Data-only pushes are
+    # NOT viable here — Expo/FCM still posts an empty notification for them.)
+    # In-app grouping (WhatsApp-style) is handled by the local-notification path
+    # when the app is alive; see pushNotificationService.showMessageNotification.
+    return _send_expo_push(
+        push_tokens=tokens,
+        title=sender_name,
+        body=display_body,
+        data=data,
+        channel_id="messages",
+    )
 
 
 def send_call_push(
