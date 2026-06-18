@@ -1499,6 +1499,63 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 )
                 return
 
+            # ---- RRP sync_digest: advertise our held message ids to room peers ----
+            # The server is a dumb relay — it forwards the digest (ids only, no
+            # content) to the OTHER members of the room so each can detect and
+            # request gaps.
+            if msg_type == "sync_digest":
+                room_id = data.get("room_id", "")
+                ids = data.get("ids", [])
+                if not room_id or not ids:
+                    return
+                member_ids = await self.get_room_member_ids(room_id)
+                for member_id in member_ids:
+                    if member_id == self.user.id:
+                        continue
+                    for channel in get_user_notification_channels(member_id):
+                        await self.channel_layer.send(
+                            channel,
+                            {
+                                "type": "notify",
+                                "payload": {
+                                    "event": "sync_digest",
+                                    "room_id": str(room_id),
+                                    "ids": ids,
+                                    "from_user_id": self.user.id,
+                                    "from_username": self.user.username,
+                                },
+                            },
+                        )
+                return
+
+            # ---- RRP sync_request: peer is missing ids → relay to room peers ----
+            # Recipients re-send the requested messages via their existing outbox
+            # flush path (ids + media preserved). Server stays a dumb relay.
+            if msg_type == "sync_request":
+                room_id = data.get("room_id", "")
+                ids = data.get("ids", [])
+                if not room_id or not ids:
+                    return
+                member_ids = await self.get_room_member_ids(room_id)
+                for member_id in member_ids:
+                    if member_id == self.user.id:
+                        continue
+                    for channel in get_user_notification_channels(member_id):
+                        await self.channel_layer.send(
+                            channel,
+                            {
+                                "type": "notify",
+                                "payload": {
+                                    "event": "sync_request",
+                                    "room_id": str(room_id),
+                                    "ids": ids,
+                                    "from_user_id": self.user.id,
+                                    "from_username": self.user.username,
+                                },
+                            },
+                        )
+                return
+
             # ---- WebRTC signaling ----
             if msg_type == "webrtc_signal":
                 target_id = data.get("target_user_id")
@@ -1638,6 +1695,21 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             from_user_id=from_user_id,
             to_user=self.user,
         ).delete()
+
+    @database_sync_to_async
+    def get_room_member_ids(self, room_id: str) -> list[int]:
+        """Member ids of a room the requesting user belongs to (RRP sync relay).
+
+        Returns [] if the room doesn't exist or the user isn't a member, so a
+        client can never fan a digest/request into a room they're not part of.
+        """
+        try:
+            room = ChatRoom.objects.get(id=room_id)
+        except ChatRoom.DoesNotExist:
+            return []
+        if not room.members.filter(id=self.user.id).exists():
+            return []
+        return list(room.members.values_list("id", flat=True))
 
     @database_sync_to_async
     def mark_message_delivery_acked_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
