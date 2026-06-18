@@ -269,6 +269,7 @@ class UserDevice(models.Model):
     )
     installation_id = models.CharField(max_length=128, unique=True, db_index=True)
     expo_push_token = models.CharField(max_length=200, blank=True, default="")
+    fcm_token = models.CharField(max_length=255, blank=True, default="")
     platform = models.CharField(
         max_length=16,
         choices=PLATFORM_CHOICES,
@@ -286,6 +287,7 @@ class UserDevice(models.Model):
         indexes = [
             models.Index(fields=["user", "is_active"]),
             models.Index(fields=["expo_push_token"]),
+            models.Index(fields=["fcm_token"]),
         ]
 
     def __str__(self) -> str:

@@ -3,6 +3,7 @@ Django settings for config project — ChatConnect.
 Real-time chat, voice call, and video call application.
 """
 
+import json
 import os
 from datetime import timedelta
 from pathlib import Path
@@ -336,6 +337,26 @@ LIVEKIT_URL = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
 #   2. HMAC time-limited (recommended for Coturn):  set TURN_SECRET only
 #      Coturn must have `use-auth-secret` and `static-auth-secret=<TURN_SECRET>`
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Firebase Cloud Messaging (FCM v1) - data messages for WhatsApp-style
+# background delivery. FCM_SERVICE_ACCOUNT_JSON accepts EITHER a filesystem
+# path to the service-account JSON (local dev) OR the raw JSON contents
+# (Railway / production, where there's no reliable filesystem to drop a file).
+# ---------------------------------------------------------------------------
+
+FCM_SERVICE_ACCOUNT_INFO = None
+_fcm_raw = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip()
+if _fcm_raw:
+    try:
+        if _fcm_raw.startswith("{"):
+            FCM_SERVICE_ACCOUNT_INFO = json.loads(_fcm_raw)
+        elif os.path.exists(_fcm_raw):
+            with open(_fcm_raw, "r", encoding="utf-8") as _fcm_file:
+                FCM_SERVICE_ACCOUNT_INFO = json.load(_fcm_file)
+    except Exception:  # never let a bad credential break boot
+        FCM_SERVICE_ACCOUNT_INFO = None
+
 
 TURN_URLS = [u.strip() for u in os.getenv("TURN_URLS", "").split(",") if u.strip()]
 TURN_SECRET = os.getenv("TURN_SECRET", "")        # HMAC secret (Coturn REST API)

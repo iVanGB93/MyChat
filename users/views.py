@@ -490,6 +490,7 @@ class RegisterPushTokenView(APIView):
 
     POST  {
       "token": "ExponentPushToken[...]",
+      "fcm_token": "<raw FCM device token>",
       "installation_id": "uuid",
       "platform": "android"|"ios"|"web",
       "device_name": "Pixel 8",
@@ -499,40 +500,54 @@ class RegisterPushTokenView(APIView):
 
     def post(self, request):
         token = request.data.get("token", "").strip()
+        fcm_token = request.data.get("fcm_token", "").strip()
         installation_id = request.data.get("installation_id", "").strip()
         platform = request.data.get("platform", UserDevice.PLATFORM_UNKNOWN).strip() or UserDevice.PLATFORM_UNKNOWN
         device_name = request.data.get("device_name", "").strip()
         app_version = request.data.get("app_version", "").strip()
-        if not token:
+        if not token and not fcm_token:
             return Response(
-                {"error": "token is required"},
+                {"error": "token or fcm_token is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         # Fall back to a stable installation id derived from the token so that
         # older/minimal clients that only send {token} still register a device
         # row instead of being silently dropped (which left push delivery dead).
         if not installation_id:
-            installation_id = "token-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+            seed = token or fcm_token
+            installation_id = "token-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
         if platform not in {choice for choice, _label in UserDevice.PLATFORM_CHOICES}:
             platform = UserDevice.PLATFORM_UNKNOWN
 
         # Clear token from any other installation so one push endpoint maps to one device row.
-        UserDevice.objects.filter(expo_push_token=token).exclude(
-            installation_id=installation_id
-        ).update(expo_push_token="", is_active=False)
+        if token:
+            UserDevice.objects.filter(expo_push_token=token).exclude(
+                installation_id=installation_id
+            ).update(expo_push_token="", is_active=False)
+        if fcm_token:
+            UserDevice.objects.filter(fcm_token=fcm_token).exclude(
+                installation_id=installation_id
+            ).update(fcm_token="")
+
+        defaults = {
+            "user": request.user,
+            "platform": platform,
+            "device_name": device_name,
+            "app_version": app_version,
+            "is_active": True,
+            "last_seen": timezone.now(),
+        }
+        # Only overwrite a token field when the client actually sent one, so a
+        # partial update (e.g. only the FCM token refreshed) never wipes the other.
+        if token:
+            defaults["expo_push_token"] = token
+        if fcm_token:
+            defaults["fcm_token"] = fcm_token
 
         UserDevice.objects.update_or_create(
             installation_id=installation_id,
-            defaults={
-                "user": request.user,
-                "expo_push_token": token,
-                "platform": platform,
-                "device_name": device_name,
-                "app_version": app_version,
-                "is_active": True,
-                "last_seen": timezone.now(),
-            },
+            defaults=defaults,
         )
         return Response({"status": "ok"})
 
