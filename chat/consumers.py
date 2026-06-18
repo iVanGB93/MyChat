@@ -610,7 +610,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # Pass through every client-supplied field except control keys and
             # anything we want to authoritatively set ourselves.
             _RESERVED = {"type", "message", "id", "created_at",
-                         "sender", "sender_id"}
+                         "sender", "sender_id", "hydration"}
             msg_data = {k: v for k, v in data.items() if k not in _RESERVED}
             msg_data.update({
                 "id": message_id,
@@ -631,6 +631,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     "message": msg_data,
                 },
             )
+
+            # Media-hydration re-send: a recipient that received a b64-stripped
+            # push asked us to re-deliver the media for an EXISTING message. It
+            # already has the message row and was already notified, so relay over
+            # the room WS group above only — never re-run the notification/push
+            # fan-out (that would fire a duplicate notification).
+            if data.get("hydration"):
+                return
 
             # For members NOT actively in the room chat WS (either not connected
             # to the room, or connected but app is backgrounded):
