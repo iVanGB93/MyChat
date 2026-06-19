@@ -77,6 +77,39 @@ def get_fcm_status() -> dict:
     }
 
 
+def send_fcm_test(fcm_token: str) -> dict:
+    """Send ONE FCM data message to a token and return a diagnosable result.
+
+    Surfaces the exact firebase-admin error (e.g. UNREGISTERED token, sender
+    mismatch) so push delivery can be debugged from the browser without needing
+    server log access. Never raises.
+    """
+    app = _get_fcm_app()
+    if not app:
+        return {"ok": False, "reason": "fcm_not_initialized"}
+    if not fcm_token:
+        return {"ok": False, "reason": "no_fcm_token"}
+    try:
+        from firebase_admin import messaging
+    except Exception as exc:
+        return {"ok": False, "reason": "sdk_import_failed", "detail": str(exc)}
+    msg = messaging.Message(
+        token=fcm_token,
+        data={
+            "type": "diagnostic",
+            "title": "Diagnostic",
+            "body": "FCM test",
+            "channelId": "messages",
+        },
+        android=messaging.AndroidConfig(priority="high"),
+    )
+    try:
+        message_id = messaging.send(msg, app=app)
+        return {"ok": True, "message_id": message_id}
+    except Exception as exc:
+        return {"ok": False, "reason": type(exc).__name__, "detail": str(exc)}
+
+
 def _send_fcm_data(
     fcm_tokens: list[str],
     data: dict,

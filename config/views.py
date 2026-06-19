@@ -322,6 +322,23 @@ def monitor_routing_view(request, user_id: int):
             "last_app_state_change_at": presence.last_app_state_change_at.isoformat() if presence.last_app_state_change_at else None,
         }
 
+    # Optional live FCM send probe: ?test_push=1 sends one real data message to
+    # the user's registered FCM token and reports the exact result/error.
+    test_push = None
+    if request.GET.get("test_push"):
+        from chat.push import send_fcm_test
+        probe_device = (
+            user.devices.filter(is_active=True)
+            .exclude(fcm_token="")
+            .exclude(fcm_token__isnull=True)
+            .order_by("-last_seen")
+            .first()
+        )
+        if probe_device and probe_device.fcm_token:
+            test_push = send_fcm_test(probe_device.fcm_token)
+        else:
+            test_push = {"ok": False, "reason": "no_fcm_token_on_device"}
+
     return JsonResponse({
         "user": {
             "id": user.id,
@@ -335,5 +352,6 @@ def monitor_routing_view(request, user_id: int):
         "devices": devices,
         "device_count": len(devices),
         "fcm": get_fcm_status(),
+        "test_push": test_push,
         "recent_decisions": get_recent_notification_decisions(user_id=user_id, limit=50),
     })
