@@ -866,6 +866,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         message_id=message_id,
                         sender_name=self.user.username,
                         room_name=room_info["name"],
+                        content=message_content,
+                        message_type=message_type_str,
+                        created_at=created_at,
+                        extra_data={
+                            k: v for k, v in msg_data.items()
+                            if k not in ("id", "sender", "sender_id", "content",
+                                         "message_type", "created_at",
+                                         "correlation_id", "route_reason")
+                        },
                     )
                 )
 
@@ -1065,7 +1074,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
             extra_data=extra_data,
         )
 
-    async def push_fallback_after_timeout(self, message_id: str, sender_name: str, room_name: str):
+    async def push_fallback_after_timeout(
+        self,
+        message_id: str,
+        sender_name: str,
+        room_name: str,
+        content: str | None = None,
+        message_type: str | None = None,
+        created_at: str | None = None,
+        extra_data: dict | None = None,
+    ):
         await asyncio.sleep(MESSAGE_ACK_TIMEOUT_SECONDS)
         pending_recipient_ids = await self.get_pending_recipients_for_message(message_id)
         if not pending_recipient_ids:
@@ -1073,13 +1091,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
         sent = await self._send_message_push(
             recipient_ids=pending_recipient_ids,
             sender_name=sender_name,
-            content=None,  # content not available at fallback time
+            content=content,  # real message content so a killed/backgrounded
+                              # recipient can persist it (not just ack it)
             room_id=str(self.room_id),
             room_name=room_name,
             correlation_id=f"msg:{message_id}",
             route_reason="push_fallback_timeout",
             message_id=message_id,
             sender_id=self.user.id,
+            message_type=message_type,
+            created_at=created_at,
+            extra_data=extra_data,
         )
         if sent:
             await self.mark_push_sent(message_id, pending_recipient_ids)
