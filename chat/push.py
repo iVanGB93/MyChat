@@ -53,6 +53,30 @@ def _get_fcm_app():
     return _fcm_app
 
 
+def get_fcm_status() -> dict:
+    """Report whether FCM data-push delivery is operational on this server.
+
+    Browser-inspectable via the routing monitor so we can confirm the deployed
+    instance actually has a valid credential without shell/log access.
+    """
+    info = getattr(settings, "FCM_SERVICE_ACCOUNT_INFO", None)
+    project_id = None
+    if isinstance(info, dict):
+        project_id = info.get("project_id")
+    app = _get_fcm_app()
+    try:
+        import firebase_admin  # noqa: F401
+        sdk_available = True
+    except Exception:
+        sdk_available = False
+    return {
+        "credential_configured": bool(info),
+        "sdk_available": sdk_available,
+        "initialized": app is not None,
+        "project_id": project_id,
+    }
+
+
 def _send_fcm_data(
     fcm_tokens: list[str],
     data: dict,
@@ -66,7 +90,14 @@ def _send_fcm_data(
     must be strings. Fire-and-forget: never raises.
     """
     app = _get_fcm_app()
-    if not app or not fcm_tokens:
+    if not app:
+        logger.warning(
+            "[FCM] skip send for %d token(s) — firebase app not initialised "
+            "(FCM_SERVICE_ACCOUNT_JSON missing/invalid on this server?)",
+            len(fcm_tokens),
+        )
+        return False
+    if not fcm_tokens:
         return False
     try:
         from firebase_admin import messaging

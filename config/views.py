@@ -270,6 +270,7 @@ def monitor_api(request):
 def monitor_routing_view(request, user_id: int):
     """Inspect the structured notification-routing state for one user."""
     from chat.consumers import get_recent_notification_decisions, get_user_notification_channels, get_user_routing_state
+    from chat.push import get_fcm_status, _is_expo_push_token
 
     try:
         user = User.objects.select_related("profile", "presence").get(id=user_id)
@@ -287,6 +288,8 @@ def monitor_routing_view(request, user_id: int):
             "is_active",
             "last_seen",
             "updated_at",
+            "expo_push_token",
+            "fcm_token",
         )
     )
     for device in devices:
@@ -294,6 +297,13 @@ def monitor_routing_view(request, user_id: int):
             device["last_seen"] = device["last_seen"].isoformat()
         if device.get("updated_at"):
             device["updated_at"] = device["updated_at"].isoformat()
+        # Never leak the full tokens; expose only what's needed to diagnose
+        # which push channel a device can use.
+        expo = device.pop("expo_push_token", None) or ""
+        fcm = device.pop("fcm_token", None) or ""
+        device["has_expo_token"] = _is_expo_push_token(expo)
+        device["has_fcm_token"] = bool(fcm)
+        device["fcm_token_prefix"] = (fcm[:12] + "…") if fcm else ""
 
     presence = getattr(user, "presence", None)
     presence_payload = None
@@ -324,5 +334,6 @@ def monitor_routing_view(request, user_id: int):
         "notification_channel_count": len(channels),
         "devices": devices,
         "device_count": len(devices),
+        "fcm": get_fcm_status(),
         "recent_decisions": get_recent_notification_decisions(user_id=user_id, limit=50),
     })
