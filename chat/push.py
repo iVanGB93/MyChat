@@ -228,7 +228,19 @@ def send_message_push(
         e for (e, f) in device_rows
         if not f and _is_expo_push_token(e)
     ]
-    display_body = (content or "New message")[:200]
+    # Notification body. Media messages carry no text content, so show a
+    # type-aware placeholder ("📷 Photo" / "🎤 Voice message") instead of a
+    # generic "New message".
+    if content:
+        display_body = content[:200]
+    elif message_type in ("image", "photo"):
+        display_body = "📷 Photo"
+    elif message_type in ("voice", "audio"):
+        display_body = "🎤 Voice message"
+    elif message_type == "video":
+        display_body = "🎬 Video"
+    else:
+        display_body = "New message"
     data: dict = {
         "type": "new_message",
         "roomId": room_id,
