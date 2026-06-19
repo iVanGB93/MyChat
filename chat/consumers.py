@@ -102,6 +102,7 @@ def get_user_routing_state(user_id: int) -> dict:
     ).filter(
         Q(expo_push_token__startswith="ExponentPushToken[")
         | Q(expo_push_token__startswith="ExpoPushToken[")
+        | ~Q(fcm_token="")
     ).exists()
 
     call_push_available = UserDevice.objects.filter(
