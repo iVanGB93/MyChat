@@ -77,12 +77,18 @@ def get_fcm_status() -> dict:
     }
 
 
-def send_fcm_test(fcm_token: str) -> dict:
-    """Send ONE FCM data message to a token and return a diagnosable result.
+def send_fcm_test(fcm_token: str, notification: bool = False) -> dict:
+    """Send ONE FCM message to a token and return a diagnosable result.
 
     Surfaces the exact firebase-admin error (e.g. UNREGISTERED token, sender
     mismatch) so push delivery can be debugged from the browser without needing
     server log access. Never raises.
+
+    When ``notification`` is True a `notification` block is attached (mirroring a
+    real message push) so a killed/backgrounded recipient should get an
+    OS/Google-Play-Services-drawn banner WITHOUT the app process starting. This
+    isolates "does FCM display on this killed device at all?" from "does the
+    data-only background handler wake?".
     """
     app = _get_fcm_app()
     if not app:
@@ -93,16 +99,31 @@ def send_fcm_test(fcm_token: str) -> dict:
         from firebase_admin import messaging
     except Exception as exc:
         return {"ok": False, "reason": "sdk_import_failed", "detail": str(exc)}
-    msg = messaging.Message(
-        token=fcm_token,
-        data={
-            "type": "diagnostic",
-            "title": "Diagnostic",
-            "body": "FCM test",
-            "channelId": "messages",
-        },
-        android=messaging.AndroidConfig(priority="high"),
-    )
+    if notification:
+        msg = messaging.Message(
+            token=fcm_token,
+            data={"type": "diagnostic", "channelId": "messages"},
+            notification=messaging.Notification(
+                title="Diagnostic", body="FCM notification test",
+            ),
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="messages", default_sound=True, priority="high",
+                ),
+            ),
+        )
+    else:
+        msg = messaging.Message(
+            token=fcm_token,
+            data={
+                "type": "diagnostic",
+                "title": "Diagnostic",
+                "body": "FCM test",
+                "channelId": "messages",
+            },
+            android=messaging.AndroidConfig(priority="high"),
+        )
     try:
         message_id = messaging.send(msg, app=app)
         return {"ok": True, "message_id": message_id}
@@ -391,16 +412,19 @@ def send_message_push(
                 # Skip oversized values to keep the payload under Expo's limit.
                 continue
             data[k] = sv
-    # DATA-ONLY FCM push: we deliberately omit the `notification` block so that
-    # react-native-firebase invokes `setBackgroundMessageHandler` even when the
-    # app is fully killed. That handler is where the app decides what to show:
-    # it persists the message to SQLite, fires the delivery ack, and renders the
-    # WhatsApp-style MessagingStyle banner via notifee. (A `notification` block
-    # would make the OS draw a basic alert itself and SKIP the handler when the
-    # app is killed — no save, no ack, no rich render — which is exactly the
-    # killed-recipient gap we are fixing.) title/body still ride in `data` so the
-    # handler has the sender + content to render. Expo is the fallback for
-    # devices without a raw FCM token.
+    # HYBRID FCM push: we attach a `notification` block (via title/body) so that
+    # Google Play Services renders the banner ITSELF when the recipient app is
+    # backgrounded or fully killed — GPS does not need to start the (dead) app
+    # process to show it, which a DATA-ONLY message DOES require. (Confirmed in
+    # the field: a data-only high-priority message did NOT wake a swiped-away
+    # app — route was push_floor and FCM accepted the send, but the killed
+    # process never started, so no banner and no delivery ack ever fired.) The
+    # `data` payload still rides along so that whenever the app IS alive
+    # (foreground, or its background handler runs) it can persist the message to
+    # SQLite and send the delivery ack. To avoid a DOUBLE banner the app's
+    # background handler must NOT draw its own notifee notification when a
+    # `notification` block is present — it only persists + acks and lets GPS draw.
+    # Expo is the fallback for devices without a raw FCM token.
     sent = False
     if fcm_tokens:
         fcm_data = dict(data)
@@ -410,6 +434,8 @@ def send_message_push(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
             channel_id="messages",
+            title=sender_name or "New message",
+            body=display_body,
         ) or sent
     if tokens:
         sent = _send_expo_push(

@@ -335,7 +335,11 @@ def monitor_routing_view(request, user_id: int):
             .first()
         )
         if probe_device and probe_device.fcm_token:
-            test_push = send_fcm_test(probe_device.fcm_token)
+            # ?test_push=notif sends an OS-drawn notification-block probe (tests
+            # killed/background display via Google Play Services); any other
+            # truthy value sends the data-only probe.
+            want_notif = request.GET.get("test_push") == "notif"
+            test_push = send_fcm_test(probe_device.fcm_token, notification=want_notif)
         else:
             test_push = {"ok": False, "reason": "no_fcm_token_on_device"}
 
