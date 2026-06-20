@@ -165,9 +165,19 @@ def decide_message_notification_route(room_id: str, routing_state: dict, in_room
     need no extra notification ("room_ws_active"). Every other state is
     "off_screen": the caller then relays over the notification WS AND queues a
     push floor, and the app decides what to surface from its own true state.
+
+    CRITICAL: "room_ws_active" requires the app to be in the FOREGROUND
+    (``app_state == active``), NOT merely a connected chat socket. When a user
+    backgrounds the app it sends ``app_state: background`` but its room socket
+    can linger for several seconds (until the OS/network drops it) — during
+    that window ``chat_ws_connected`` is still True. If we suppressed the push
+    on socket-connection alone, a just-backgrounded recipient would get NO push
+    (the message only arrives over WS when they reopen). So we gate on
+    ``app_state`` and freshness, matching the documented intent below.
     """
     if (
-        routing_state["presence"] == "active"
+        routing_state.get("app_state") == UserPresence.APP_STATE_ACTIVE
+        and not routing_state.get("is_stale")
         and in_room_via_chat_ws
         and routing_state["chat_ws_connected"]
         and routing_state["active_room_id"] == str(room_id)
