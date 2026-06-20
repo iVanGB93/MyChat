@@ -391,18 +391,18 @@ def send_message_push(
                 # Skip oversized values to keep the payload under Expo's limit.
                 continue
             data[k] = sv
-    # Notification-style push: the OS renders it with the real sender + content,
-    # which is reliable even when the app is fully killed. (Data-only pushes are
-    # NOT viable here - Expo/FCM still posts an empty notification for them.)
-    # In-app grouping (WhatsApp-style) is handled by the local-notification path
-    # when the app is alive; see pushNotificationService.showMessageNotification.
+    # DATA-ONLY FCM push: we deliberately omit the `notification` block so that
+    # react-native-firebase invokes `setBackgroundMessageHandler` even when the
+    # app is fully killed. That handler is where the app decides what to show:
+    # it persists the message to SQLite, fires the delivery ack, and renders the
+    # WhatsApp-style MessagingStyle banner via notifee. (A `notification` block
+    # would make the OS draw a basic alert itself and SKIP the handler when the
+    # app is killed — no save, no ack, no rich render — which is exactly the
+    # killed-recipient gap we are fixing.) title/body still ride in `data` so the
+    # handler has the sender + content to render. Expo is the fallback for
+    # devices without a raw FCM token.
     sent = False
     if fcm_tokens:
-        # HYBRID FCM: the `notification` block makes the OS render the alert even
-        # when the app is fully killed; the data payload rides along so the app
-        # can save-to-DB / ack / render the rich MessagingStyle notification
-        # whenever it is actually running (foreground, or kept alive by the
-        # foreground service).
         fcm_data = dict(data)
         fcm_data["title"] = sender_name or "New message"
         fcm_data["body"] = display_body
@@ -410,8 +410,6 @@ def send_message_push(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
             channel_id="messages",
-            title=sender_name or "New message",
-            body=display_body,
         ) or sent
     if tokens:
         sent = _send_expo_push(
