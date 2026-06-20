@@ -441,17 +441,14 @@ def send_message(request):
             )
             continue
 
-        if route == "notif_ws":
-            MessageDelivery.objects.filter(
-                room_id=room_id, message_id=message_id,
-                sender_id=request.user.id, recipient_id=member_id,
-            ).update(routed_via=MessageDelivery.ROUTE_NOTIF_WS, routed_at=now)
-            record_notification_decision(
-                kind="message", route=route, correlation_id=f"msg:{message_id}",
-                route_reason="notification_ws_available",
-                sender_id=request.user.id, recipient_id=member_id,
-                room_id=room_id, routing_state=routing_state,
-            )
+        # Recipient is OFF-SCREEN for this room. Send everything and let the
+        # app decide: relay over every notification WS the user has open AND
+        # always queue a push floor when a token exists. A foreground app
+        # receives the push silently (onMessage); only backgrounded/killed apps
+        # render the OS banner — so this never double-notifies.
+        relayed_via_ws = False
+        will_push = bool(routing_state["push_available"])
+        if member_channels:
             notify_payload = {
                 "event": "new_message",
                 "room_id": room_id,
@@ -464,6 +461,10 @@ def send_message(request):
                 "created_at": created_at,
                 "correlation_id": f"msg:{message_id}",
                 "route_reason": "notif_ws",
+                # Tell the app a push floor is also in flight so it can defer the
+                # OS banner to FCM and avoid double-notifying. When False, the
+                # app is the ONLY notification surface.
+                "push_floor": will_push,
             }
             for k, v in msg_data.items():
                 if k not in notify_payload and k not in ("id", "sender"):
@@ -472,20 +473,31 @@ def send_message(request):
                 async_to_sync(channel_layer.send)(
                     channel, {"type": "notify", "payload": notify_payload},
                 )
-            continue
+            relayed_via_ws = True
 
-        if route == "push_initial":
+        if routing_state["push_available"]:
             MessageDelivery.objects.filter(
                 room_id=room_id, message_id=message_id,
                 sender_id=request.user.id, recipient_id=member_id,
             ).update(routed_via=MessageDelivery.ROUTE_PUSH, routed_at=now)
             record_notification_decision(
-                kind="message", route=route, correlation_id=f"msg:{message_id}",
-                route_reason="push_available_ws_unavailable",
+                kind="message", route="push_floor", correlation_id=f"msg:{message_id}",
+                route_reason="push_floor_always",
                 sender_id=request.user.id, recipient_id=member_id,
                 room_id=room_id, routing_state=routing_state,
             )
             push_recipients.append(member_id)
+        elif relayed_via_ws:
+            MessageDelivery.objects.filter(
+                room_id=room_id, message_id=message_id,
+                sender_id=request.user.id, recipient_id=member_id,
+            ).update(routed_via=MessageDelivery.ROUTE_NOTIF_WS, routed_at=now)
+            record_notification_decision(
+                kind="message", route="notif_ws", correlation_id=f"msg:{message_id}",
+                route_reason="notification_ws_no_push_token",
+                sender_id=request.user.id, recipient_id=member_id,
+                room_id=room_id, routing_state=routing_state,
+            )
         else:
             MessageDelivery.objects.filter(
                 room_id=room_id, message_id=message_id,

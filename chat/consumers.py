@@ -156,6 +156,16 @@ def get_user_routing_state(user_id: int) -> dict:
 
 
 def decide_message_notification_route(room_id: str, routing_state: dict, in_room_via_chat_ws: bool, has_notification_channels: bool) -> str:
+    """Classify the recipient as either actively in-room or off-screen.
+
+    Mobile presence is too unreliable to pick a single delivery channel, so we
+    no longer try. The only distinction that matters here is whether the
+    recipient is *foreground and actively viewing this room* over a live chat
+    WS — in which case they already received the message on the room socket and
+    need no extra notification ("room_ws_active"). Every other state is
+    "off_screen": the caller then relays over the notification WS AND queues a
+    push floor, and the app decides what to surface from its own true state.
+    """
     if (
         routing_state["presence"] == "active"
         and in_room_via_chat_ws
@@ -163,19 +173,7 @@ def decide_message_notification_route(room_id: str, routing_state: dict, in_room
         and routing_state["active_room_id"] == str(room_id)
     ):
         return "room_ws_active"
-    # Background sessions are not reliable for user-visible alerts on mobile.
-    # Prefer remote push so off-screen users still get an OS-level notification.
-    if routing_state["presence"] == "background":
-        if routing_state["push_available"]:
-            return "push_initial"
-        if has_notification_channels and routing_state["notification_ws_connected"] and not routing_state["is_stale"]:
-            return "notif_ws"
-        return "pending_only"
-    if has_notification_channels and routing_state["notification_ws_connected"] and not routing_state["is_stale"]:
-        return "notif_ws"
-    if routing_state["push_available"]:
-        return "push_initial"
-    return "pending_only"
+    return "off_screen"
 
 
 def decide_call_notification_route(routing_state: dict, has_notification_channels: bool) -> str:
@@ -716,32 +714,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     )
                     continue
 
-                if route == "notif_ws":
-                    await self.mark_message_delivery_routed(
-                        message_id=message_id,
-                        recipient_id=member_id,
-                        routed_via=MessageDelivery.ROUTE_NOTIF_WS,
-                    )
-                    record_notification_decision(
-                        kind="message",
-                        route=route,
-                        correlation_id=f"msg:{message_id}",
-                        route_reason="notification_ws_available",
-                        sender_id=self.user.id,
-                        recipient_id=member_id,
-                        room_id=str(self.room_id),
-                        routing_state=routing_state,
-                    )
-                    logger.info(
-                        "[NotifyDecision] kind=message route=notif_ws room=%s message_id=%s sender=%s recipient=%s state=%s channels=%d",
-                        str(self.room_id),
-                        message_id,
-                        self.user.id,
-                        member_id,
-                        routing_state,
-                        len(member_channels),
-                    )
-                    # Online — relay to ALL notification sessions (multi-device support).
+                # Recipient is OFF-SCREEN for this room (not connected, or
+                # connected but backgrounded, or viewing another screen).
+                # Per the "send everything, let the app decide" model we do BOTH
+                # of the following independently — we no longer try to guess a
+                # single channel from (unreliable) presence:
+                #   1) Relay the full message over every notification WS the user
+                #      has open (instant in-app toast / background save), AND
+                #   2) ALWAYS queue an FCM/Expo push as the guaranteed
+                #      notification floor whenever a push token exists.
+                # The OS only renders the push banner when the app is
+                # backgrounded/killed; a foreground app receives the same push
+                # silently (onMessage), so this never double-notifies. The app
+                # itself decides what to display based on its own true state.
+                relayed_via_ws = False
+                will_push = bool(routing_state["push_available"])
+                if member_channels:
+                    # Relay to ALL notification sessions (multi-device support).
                     # Pass through every field from msg_data so the apps see the
                     # exact same payload they'd get on the room socket.
                     notify_payload = {
@@ -756,6 +745,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         "created_at": created_at,
                         "correlation_id": f"msg:{message_id}",
                         "route_reason": "notif_ws",
+                        # Tell the app a push floor is also in flight so it can
+                        # defer the OS banner to FCM and avoid double-notifying.
+                        # When False, the app is the ONLY notification surface.
+                        "push_floor": will_push,
                     }
                     # Forward any extra client-supplied fields (e.g. reply_to)
                     # without the consumer having to know about them.
@@ -770,56 +763,48 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                 "payload": notify_payload,
                             },
                         )
-                elif route == "push_initial":
-                    # Offline but push-capable — keep a pending marker and queue push.
-                    await self.mark_message_delivery_routed(
-                        message_id=message_id,
-                        recipient_id=member_id,
-                        routed_via=MessageDelivery.ROUTE_PUSH,
-                    )
-                    record_notification_decision(
-                        kind="message",
-                        route=route,
-                        correlation_id=f"msg:{message_id}",
-                        route_reason="push_available_ws_unavailable",
-                        sender_id=self.user.id,
-                        recipient_id=member_id,
-                        room_id=str(self.room_id),
-                        routing_state=routing_state,
-                    )
-                    logger.info(
-                        "[NotifyDecision] kind=message route=push_initial room=%s message_id=%s sender=%s recipient=%s state=%s",
-                        str(self.room_id),
-                        message_id,
-                        self.user.id,
-                        member_id,
-                        routing_state,
-                    )
+                    relayed_via_ws = True
+
+                if will_push:
                     push_recipients.append(member_id)
+                    routed_via = MessageDelivery.ROUTE_PUSH
+                    route_label = "push_floor"
+                    route_reason = "push_floor_always"
+                elif relayed_via_ws:
+                    routed_via = MessageDelivery.ROUTE_NOTIF_WS
+                    route_label = "notif_ws"
+                    route_reason = "notification_ws_no_push_token"
                 else:
-                    await self.mark_message_delivery_routed(
-                        message_id=message_id,
-                        recipient_id=member_id,
-                        routed_via=MessageDelivery.ROUTE_PENDING_ONLY,
-                    )
-                    record_notification_decision(
-                        kind="message",
-                        route=route,
-                        correlation_id=f"msg:{message_id}",
-                        route_reason="no_push_endpoint_available",
-                        sender_id=self.user.id,
-                        recipient_id=member_id,
-                        room_id=str(self.room_id),
-                        routing_state=routing_state,
-                    )
-                    logger.info(
-                        "[NotifyDecision] kind=message route=pending_only room=%s message_id=%s sender=%s recipient=%s state=%s",
-                        str(self.room_id),
-                        message_id,
-                        self.user.id,
-                        member_id,
-                        routing_state,
-                    )
+                    routed_via = MessageDelivery.ROUTE_PENDING_ONLY
+                    route_label = "pending_only"
+                    route_reason = "no_push_endpoint_available"
+
+                await self.mark_message_delivery_routed(
+                    message_id=message_id,
+                    recipient_id=member_id,
+                    routed_via=routed_via,
+                )
+                record_notification_decision(
+                    kind="message",
+                    route=route_label,
+                    correlation_id=f"msg:{message_id}",
+                    route_reason=route_reason,
+                    sender_id=self.user.id,
+                    recipient_id=member_id,
+                    room_id=str(self.room_id),
+                    routing_state=routing_state,
+                )
+                logger.info(
+                    "[NotifyDecision] kind=message route=%s room=%s message_id=%s sender=%s recipient=%s state=%s ws_relay=%s push=%s",
+                    route_label,
+                    str(self.room_id),
+                    message_id,
+                    self.user.id,
+                    member_id,
+                    routing_state,
+                    relayed_via_ws,
+                    will_push,
+                )
 
             if push_recipients:
                 logger.info(
