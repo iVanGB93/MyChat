@@ -115,12 +115,19 @@ def _send_fcm_data(
     data: dict,
     channel_id: str = "messages",
     priority: str = "high",
+    title: str | None = None,
+    body: str | None = None,
+    notification_priority: str = "high",
 ) -> bool:
-    """Send a high-priority data-only FCM v1 message to raw FCM device tokens.
+    """Send a high-priority FCM v1 message to raw FCM device tokens.
 
-    No `notification` block is included so the app's background handler wakes
-    (even when killed) and renders the notification itself. All data values
-    must be strings. Fire-and-forget: never raises.
+    HYBRID delivery: when ``title``/``body`` are provided we attach a
+    ``notification`` block so Google Play Services renders the alert itself
+    even when the app is fully killed (a data-only message cannot wake a killed
+    app reliably). The ``data`` payload still rides along so the app can
+    save-to-DB / ack / render a rich MessagingStyle notification whenever it is
+    actually running (foreground, or kept alive by the foreground service).
+    All data values must be strings. Fire-and-forget: never raises.
     """
     app = _get_fcm_app()
     if not app:
@@ -143,11 +150,39 @@ def _send_fcm_data(
     }
     str_data["channelId"] = channel_id
 
+    notification = None
+    android_notification = None
+    apns_config = None
+    if title is not None or body is not None:
+        notification = messaging.Notification(title=title, body=body)
+        android_notification = messaging.AndroidNotificationConfig(
+            channel_id=channel_id,
+            default_sound=True,
+            notification_priority=(
+                "PRIORITY_MAX" if notification_priority == "max" else "PRIORITY_HIGH"
+            ),
+        )
+        # iOS (APNs): the same notification block alerts Apple devices once an
+        # APNs key is configured in Firebase + an iOS build ships. Harmless to
+        # Android-only deployments. mutable-content lets a future Notification
+        # Service Extension enrich the alert; the data still rides in `str_data`.
+        apns_config = messaging.APNSConfig(
+            headers={"apns-priority": "10"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound="default", mutable_content=True),
+            ),
+        )
+
     messages = [
         messaging.Message(
             token=tok,
             data=str_data,
-            android=messaging.AndroidConfig(priority=priority),
+            notification=notification,
+            android=messaging.AndroidConfig(
+                priority=priority,
+                notification=android_notification,
+            ),
+            apns=apns_config,
         )
         for tok in fcm_tokens
         if tok
@@ -365,8 +400,11 @@ def send_message_push(
     # when the app is alive; see pushNotificationService.showMessageNotification.
     sent = False
     if fcm_tokens:
-        # FCM data message carries title/body so the app's background handler
-        # can render the MessagingStyle notification itself.
+        # HYBRID FCM: the `notification` block makes the OS render the alert even
+        # when the app is fully killed; the data payload rides along so the app
+        # can save-to-DB / ack / render the rich MessagingStyle notification
+        # whenever it is actually running (foreground, or kept alive by the
+        # foreground service).
         fcm_data = dict(data)
         fcm_data["title"] = sender_name or "New message"
         fcm_data["body"] = display_body
@@ -374,6 +412,8 @@ def send_message_push(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
             channel_id="messages",
+            title=sender_name or "New message",
+            body=display_body,
         ) or sent
     if tokens:
         sent = _send_expo_push(
@@ -396,34 +436,63 @@ def send_call_push(
     correlation_id: str | None = None,
     route_reason: str | None = None,
 ) -> bool:
-    """Send a push notification for an incoming call."""
-    tokens = list(
+    """Send a push notification for an incoming call.
+
+    HYBRID delivery, same model as messages: devices with a raw FCM token get a
+    high-priority FCM message carrying BOTH a `notification` block (so the OS
+    rings/alerts even when the app is killed) and the call `data` (so the app
+    can show the full incoming-call UI when it is alive or when tapped). Expo is
+    the fallback for devices without an FCM token, so no device is double-pushed.
+    """
+    device_rows = list(
         UserDevice.objects.filter(
             user_id=callee_id,
             is_active=True,
-               user__notif_calls_enabled=True,
+            user__notif_calls_enabled=True,
         ).filter(
             Q(expo_push_token__startswith="ExponentPushToken[")
             | Q(expo_push_token__startswith="ExpoPushToken[")
-        ).values_list("expo_push_token", flat=True).distinct()
+            | ~Q(fcm_token="")
+        ).values_list("expo_push_token", "fcm_token").distinct()
     )
+    fcm_tokens = [f for (_e, f) in device_rows if f]
+    tokens = [e for (e, f) in device_rows if not f and _is_expo_push_token(e)]
     icon = "📹" if call_type == "video" else "📞"
-    return _send_expo_push(
-        push_tokens=tokens,
-        title=f"{icon} Incoming {call_type} call from {caller_name}",
-        body=f"Tap to answer or swipe to decline",
-        data={
-            "type": "incoming_call",
-            "callId": call_id,
-            "callerName": caller_name,
-            "callerId": caller_id,
-            "callType": call_type,
-            "roomName": room_name,
-            "correlationId": correlation_id,
-            "routeReason": route_reason,
-            "correlation_id": correlation_id,
-            "route_reason": route_reason,
-        },
-        channel_id="calls",
-        priority="high",
-    )
+    title = f"{icon} Incoming {call_type} call from {caller_name}"
+    body = "Tap to answer or swipe to decline"
+    data = {
+        "type": "incoming_call",
+        "callId": call_id,
+        "callerName": caller_name,
+        "callerId": caller_id,
+        "callType": call_type,
+        "roomName": room_name,
+        "correlationId": correlation_id,
+        "routeReason": route_reason,
+        "correlation_id": correlation_id,
+        "route_reason": route_reason,
+    }
+    sent = False
+    if fcm_tokens:
+        fcm_data = dict(data)
+        fcm_data["title"] = title
+        fcm_data["body"] = body
+        sent = _send_fcm_data(
+            fcm_tokens=fcm_tokens,
+            data=fcm_data,
+            channel_id="calls",
+            priority="high",
+            title=title,
+            body=body,
+            notification_priority="max",
+        ) or sent
+    if tokens:
+        sent = _send_expo_push(
+            push_tokens=tokens,
+            title=title,
+            body=body,
+            data=data,
+            channel_id="calls",
+            priority="high",
+        ) or sent
+    return sent
