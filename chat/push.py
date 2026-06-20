@@ -131,6 +131,11 @@ def send_fcm_test(fcm_token: str, notification: bool = False) -> dict:
         return {"ok": False, "reason": type(exc).__name__, "detail": str(exc)}
 
 
+# FCM v1 forbids these keys in the data payload (rejects the whole message with
+# INVALID_ARGUMENT). 'message_type' is the one our chat payload actually carries.
+_FCM_RESERVED_KEYS = {"from", "message_type", "notification"}
+
+
 def _send_fcm_data(
     fcm_tokens: list[str],
     data: dict,
@@ -149,6 +154,14 @@ def _send_fcm_data(
     save-to-DB / ack / render a rich MessagingStyle notification whenever it is
     actually running (foreground, or kept alive by the foreground service).
     All data values must be strings. Fire-and-forget: never raises.
+
+    NOTE: FCM v1 REJECTS the entire message with INVALID_ARGUMENT if the data
+    payload contains a reserved key ('from', 'message_type', 'notification', or
+    any key starting with 'google'/'gcm'). Our chat data carries
+    ``message_type`` (snake_case) which silently failed EVERY real message push
+    (success=0) — the diagnostic probe never tripped it because it uses a
+    ``type`` key. We strip the reserved forms below; the app already reads the
+    camelCase ``messageType`` fallback (ingressRouter normalizeMessage).
     """
     app = _get_fcm_app()
     if not app:
@@ -168,6 +181,7 @@ def _send_fcm_data(
     str_data = {
         k: ("" if v is None else str(v))
         for k, v in data.items()
+        if k not in _FCM_RESERVED_KEYS and not k.startswith(("google", "gcm"))
     }
     str_data["channelId"] = channel_id
 
@@ -211,6 +225,22 @@ def _send_fcm_data(
     try:
         resp = messaging.send_each(messages, app=app)
         if resp.failure_count:
+            # Log the ACTUAL per-token failure so we can tell apart a stale
+            # token (UnregisteredError → app reinstalled / token rotated, prune
+            # it), a wrong-project token (SenderIdMismatchError), a malformed
+            # message (InvalidArgumentError), or a credential/APNs problem
+            # (ThirdPartyAuthError). Without this we only saw "success=0
+            # failure=1" with no cause.
+            for tok, r in zip([m.token for m in messages], resp.responses):
+                if not r.success:
+                    exc = r.exception
+                    logger.warning(
+                        "[FCM] token=…%s FAILED type=%s code=%s detail=%s",
+                        (tok[-12:] if tok else "?"),
+                        type(exc).__name__ if exc else "?",
+                        getattr(exc, "code", None),
+                        str(exc) if exc else "",
+                    )
             logger.warning(
                 "[FCM] sent %d data message(s) success=%d failure=%d",
                 len(messages), resp.success_count, resp.failure_count,
