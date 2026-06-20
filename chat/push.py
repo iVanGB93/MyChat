@@ -155,12 +155,10 @@ def _send_fcm_data(
     apns_config = None
     if title is not None or body is not None:
         notification = messaging.Notification(title=title, body=body)
-        android_notification = messaging.AndroidNotificationConfig(
+        android_notification = messaging.AndroidNotification(
             channel_id=channel_id,
             default_sound=True,
-            notification_priority=(
-                "PRIORITY_MAX" if notification_priority == "max" else "PRIORITY_HIGH"
-            ),
+            priority=("max" if notification_priority == "max" else "high"),
         )
         # iOS (APNs): the same notification block alerts Apple devices once an
         # APNs key is configured in Firebase + an iOS build ships. Harmless to
