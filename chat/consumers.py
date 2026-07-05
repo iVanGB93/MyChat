@@ -604,6 +604,25 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     )
                 return
 
+            # ---- media_chunk: pure relay of one slice of a large media message ----
+            # Large photos/voice exceed the ~1 MiB WS frame limit, so the client
+            # splits the base64 into chunks and streams them. We relay each chunk
+            # to the OTHER room members over the room group only — no DB write and
+            # no notification/push (the small placeholder message already handled
+            # delivery tracking + notification). The receiver reassembles the
+            # chunks back into the media file. Media bytes never touch the server.
+            if msg_type == "media_chunk":
+                data["sender_id"] = self.user.id  # trust the authenticated sender
+                await self.channel_layer.group_send(
+                    self.room_group_name,
+                    {
+                        "type": "media_chunk_relay",
+                        "sender_id": self.user.id,
+                        "chunk": data,
+                    },
+                )
+                return
+
             # ---- Outgoing message relay (no DB persistence) ----
             # The server is a dumb relay: forward whatever fields the client
             # sent, only injecting/overriding the trusted identity fields
@@ -956,6 +975,20 @@ class ChatConsumer(AsyncWebsocketConsumer):
             }))
         except Exception:
             logger.exception("[ChatConsumer.typing_broadcast] failed user=%s room=%s",
+                             getattr(self.user, "id", None), getattr(self, "room_id", None))
+
+    async def media_chunk_relay(self, event):
+        """Relay one media chunk to the room's clients, skipping the sender.
+
+        Pure pass-through: the chunk dict is forwarded verbatim so the receiver
+        can reassemble the media. No DB write, no notification/push.
+        """
+        try:
+            if event.get("sender_id") == self.user.id:
+                return
+            await self.send(text_data=json.dumps(event["chunk"]))
+        except Exception:
+            logger.exception("[ChatConsumer.media_chunk_relay] failed user=%s room=%s",
                              getattr(self.user, "id", None), getattr(self, "room_id", None))
 
     # --- Database helpers (run in thread) ---
