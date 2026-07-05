@@ -18,6 +18,29 @@ from users.models import UserDevice, UserPresence
 User = get_user_model()
 
 
+def app_version_view(request):
+    """Public endpoint the mobile app polls on launch to decide whether to
+    suggest (or force) an update. No auth — must work before/around login.
+
+    Response:
+      latest          — newest published version
+      min_supported   — clients below this are forced to update
+      store_url        — platform store link (falls back to Android)
+      store_url_android / store_url_ios
+    """
+    platform = (request.GET.get("platform") or "").lower()
+    android = settings.APP_STORE_URL_ANDROID
+    ios = settings.APP_STORE_URL_IOS
+    store_url = ios if platform == "ios" and ios else android
+    return JsonResponse({
+        "latest": settings.APP_LATEST_VERSION,
+        "min_supported": settings.APP_MIN_SUPPORTED_VERSION,
+        "store_url": store_url,
+        "store_url_android": android,
+        "store_url_ios": ios,
+    })
+
+
 def login_view(request):
     return render(request, "login.html")
 

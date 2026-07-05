@@ -19,6 +19,8 @@ def health_check(request):
 urlpatterns = [
     # Health check (for Railway / load balancers)
     path("health/", health_check, name="health"),
+    # Mobile app version gate (public — used to suggest/force updates)
+    path("api/app/version/", views.app_version_view, name="app-version"),
     # DB-backed media (avatars, etc.) — survives ephemeral filesystems.
     path("media-db/<path:name>", serve_blob, name="media-db"),
     # Web interface (templates)

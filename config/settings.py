@@ -21,6 +21,19 @@ DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 
 ALLOWED_HOSTS = ['*']
 
+# ---- Mobile app version gating (see config.views.app_version_view) ----
+# LATEST_VERSION: newest version in the store — clients below it are offered an
+#   optional update. MIN_SUPPORTED_VERSION: clients below it are FORCED to update
+#   (e.g. after a breaking WS/protocol change). Bump these on release; overridable
+#   via env on Railway without a code deploy.
+APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "1.0.15")
+APP_MIN_SUPPORTED_VERSION = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0")
+APP_STORE_URL_ANDROID = os.getenv(
+    "APP_STORE_URL_ANDROID",
+    "https://play.google.com/store/apps/details?id=com.axonic",
+)
+APP_STORE_URL_IOS = os.getenv("APP_STORE_URL_IOS", "")
+
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
