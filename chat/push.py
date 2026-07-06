@@ -407,6 +407,17 @@ def send_message_push(
     if sender_id is not None:
         data["senderId"] = str(sender_id)
         data["sender_id"] = str(sender_id)
+        # Sender's avatar (relative URL) so the app can show the person's photo
+        # as the notification's LARGE icon (the app icon is only the small badge
+        # Android mandates). The app resolves this to an absolute URL. Best-effort.
+        try:
+            _sender = User.objects.filter(id=sender_id).first()
+            _av = getattr(_sender, "avatar", None)
+            if _av and getattr(_av, "name", ""):
+                data["senderAvatar"] = _av.url
+                data["sender_avatar"] = _av.url
+        except Exception:
+            pass
     if sender_name:
         data["sender"] = sender_name
     if content:
