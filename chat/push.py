@@ -442,18 +442,16 @@ def send_message_push(
                 # Skip oversized values to keep the payload under Expo's limit.
                 continue
             data[k] = sv
-    # HYBRID FCM push: we attach a `notification` block (via title/body) so that
-    # Google Play Services renders the banner ITSELF when the recipient app is
-    # backgrounded or fully killed — GPS does not need to start the (dead) app
-    # process to show it, which a DATA-ONLY message DOES require. (Confirmed in
-    # the field: a data-only high-priority message did NOT wake a swiped-away
-    # app — route was push_floor and FCM accepted the send, but the killed
-    # process never started, so no banner and no delivery ack ever fired.) The
-    # `data` payload still rides along so that whenever the app IS alive
-    # (foreground, or its background handler runs) it can persist the message to
-    # SQLite and send the delivery ack. To avoid a DOUBLE banner the app's
-    # background handler must NOT draw its own notifee notification when a
-    # `notification` block is present — it only persists + acks and lets GPS draw.
+    # DATA-ONLY FCM push for messages: we do NOT attach a `notification` block,
+    # so the app's background handler (setBackgroundMessageHandler) runs and
+    # renders the WhatsApp-style Notifee MessagingStyle notification itself —
+    # one box per conversation, with Reply + Mark-as-read actions. The title/
+    # body ride INSIDE the data payload so the app can render sender + text
+    # (incl. the media placeholder body). Tradeoff vs. the old hybrid banner:
+    # data-only needs the app process to run the handler — the foreground
+    # service keeps it alive for the common (backgrounded) case; a fully
+    # force-stopped / OEM-frozen app is the risk (it may show nothing until
+    # reopened). Calls stay HYBRID (see send_call_push) so ringing is reliable.
     # Expo is the fallback for devices without a raw FCM token.
     sent = False
     if fcm_tokens:
@@ -464,8 +462,6 @@ def send_message_push(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
             channel_id="messages",
-            title=sender_name or "New message",
-            body=display_body,
         ) or sent
     if tokens:
         sent = _send_expo_push(
