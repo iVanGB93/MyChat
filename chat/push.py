@@ -536,13 +536,15 @@ def send_call_push(
         fcm_data = dict(data)
         fcm_data["title"] = title
         fcm_data["body"] = body
+        # DATA-ONLY (like messages): no `notification` block, so the app's FCM
+        # background handler renders the proper CallStyle notification (full-
+        # screen, Accept/Decline, ringtone) instead of a plain OS banner that
+        # looks like a message. title/body ride inside the data for rendering.
         sent = _send_fcm_data(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
             channel_id="calls",
             priority="high",
-            title=title,
-            body=body,
             notification_priority="max",
         ) or sent
     if tokens:
