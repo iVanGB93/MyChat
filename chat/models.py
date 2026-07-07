@@ -127,3 +127,98 @@ class MessageDelivery(models.Model):
 
     def __str__(self) -> str:
         return f"{self.message_id} {self.sender_id}->{self.recipient_id} ({self.status})"
+
+
+class MediaBlob(models.Model):
+    """
+    Out-of-band storage for large media (image / voice / video) so blobs never
+    ride the chat WebSocket. The chat message carries only a lightweight pointer
+    (media_id + sha256 + thumb); the bytes are uploaded/downloaded over HTTP.
+
+    Storage is intentionally kept behind this model + `chat.media_store` so the
+    backing store (currently Postgres `bytea`) can be swapped for object storage
+    (S3 / R2) later without changing the API or the wire protocol.
+
+    Retention: the row (and its bytes) is deleted 48h after every recipient has
+    confirmed a verified, persisted download (`delete_after`), or after a hard
+    TTL as a fallback for recipients that never download. Clients keep the
+    thumbnail + metadata in their own local message row, so history survives.
+    """
+
+    IMAGE = "image"
+    VOICE = "voice"
+    VIDEO = "video"
+    MEDIA_TYPES = [(IMAGE, "Image"), (VOICE, "Voice"), (VIDEO, "Video")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    room = models.ForeignKey(
+        ChatRoom, on_delete=models.CASCADE, related_name="media_blobs"
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="uploaded_media",
+    )
+    # The client-generated id of the pointer chat message (optional link).
+    message_id = models.CharField(max_length=64, blank=True, default="")
+    media_type = models.CharField(max_length=16, choices=MEDIA_TYPES)
+    mime = models.CharField(max_length=80)
+    size_bytes = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64, db_index=True)
+    # md5 is used by the RN client for a cheap native integrity check on download
+    # (expo-file-system exposes File.md5 for free). Not for security — integrity only.
+    md5 = models.CharField(max_length=32, blank=True, default="")
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
+    # The blob bytes. Kept in a dedicated table so it never touches hot queries.
+    data = models.BinaryField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Set once every recipient has confirmed a verified download.
+    all_confirmed_at = models.DateTimeField(null=True, blank=True)
+    # created once all_confirmed_at is set; the cleanup sweep deletes at/after this.
+    delete_after = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["delete_after"]),
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["room", "owner"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"MediaBlob<{self.id} {self.media_type} {self.size_bytes}B>"
+
+
+class MediaDownload(models.Model):
+    """
+    Reference-count row: one per (media, recipient device) that has confirmed a
+    verified, persisted download. When every recipient (room member except the
+    owner) has at least one confirmed device, the blob becomes eligible for
+    deletion after the 48h grace window.
+    """
+
+    media = models.ForeignKey(
+        MediaBlob, on_delete=models.CASCADE, related_name="downloads"
+    )
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="media_downloads",
+    )
+    installation_id = models.CharField(max_length=128, blank=True, default="")
+    verified_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["media", "recipient", "installation_id"],
+                name="uniq_media_download_per_device",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["media", "recipient"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"MediaDownload<{self.media_id} r={self.recipient_id}>"

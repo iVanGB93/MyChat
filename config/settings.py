@@ -261,6 +261,18 @@ MESSAGE_DELIVERY_SWEEP_INTERVAL_SECONDS = int(
 )
 CALL_INVITE_ACK_TIMEOUT_SECONDS = int(os.getenv("CALL_INVITE_ACK_TIMEOUT_SECONDS", "12"))
 CALL_INVITE_RETRY_INTERVAL_SECONDS = int(os.getenv("CALL_INVITE_RETRY_INTERVAL_SECONDS", "20"))
+
+# ---------------------------------------------------------------------------
+# Media blob storage (out-of-band image / voice / video)
+# ---------------------------------------------------------------------------
+# Blobs are stored in Postgres (chat.MediaBlob) behind chat.media_views so the
+# backing store can be swapped for object storage later. Retention: delete a
+# blob MEDIA_DELETE_GRACE_HOURS after every recipient confirms a verified
+# download, or after MEDIA_HARD_TTL_DAYS as a fallback for never-downloaded blobs.
+MEDIA_MAX_UPLOAD_BYTES = int(os.getenv("MEDIA_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+MEDIA_DELETE_GRACE_HOURS = int(os.getenv("MEDIA_DELETE_GRACE_HOURS", "48"))
+MEDIA_HARD_TTL_DAYS = int(os.getenv("MEDIA_HARD_TTL_DAYS", "30"))
+MEDIA_CLEANUP_INTERVAL_SECONDS = int(os.getenv("MEDIA_CLEANUP_INTERVAL_SECONDS", "3600"))
 CELERY_BEAT_SCHEDULE = {
     "sweep-stale-message-deliveries": {
         "task": "chat.tasks.sweep_stale_message_deliveries",
@@ -269,6 +281,10 @@ CELERY_BEAT_SCHEDULE = {
     "sweep-stale-call-invites": {
         "task": "calls.tasks.sweep_stale_call_invites",
         "schedule": CALL_INVITE_RETRY_INTERVAL_SECONDS,
+    },
+    "cleanup-expired-media": {
+        "task": "chat.tasks.cleanup_expired_media",
+        "schedule": MEDIA_CLEANUP_INTERVAL_SECONDS,
     },
 }
 

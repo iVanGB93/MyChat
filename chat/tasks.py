@@ -98,3 +98,47 @@ def sweep_stale_message_deliveries() -> dict:
         "rows_marked": marked,
         "rows_skipped": skipped,
     }
+
+
+@shared_task
+def cleanup_expired_media() -> dict:
+    """Delete media blobs that are past retention.
+
+    Two cases:
+      1. All recipients confirmed a verified download and the grace window
+         (`delete_after`) has elapsed.
+      2. Hard-TTL fallback: the blob is older than MEDIA_HARD_TTL_DAYS regardless
+         of confirmation (covers recipients that uninstalled / never downloaded).
+
+    Clients keep the thumbnail + metadata in their own local message row, so the
+    chat history stays intact after the server blob is gone.
+    """
+    from .models import MediaBlob
+
+    now = timezone.now()
+    hard_ttl_days = int(getattr(settings, "MEDIA_HARD_TTL_DAYS", 30))
+    hard_cutoff = now - timedelta(days=hard_ttl_days)
+
+    confirmed_qs = MediaBlob.objects.filter(
+        delete_after__isnull=False, delete_after__lte=now
+    )
+    confirmed_deleted = confirmed_qs.count()
+    confirmed_qs.delete()
+
+    stale_qs = MediaBlob.objects.filter(created_at__lt=hard_cutoff)
+    stale_deleted = stale_qs.count()
+    stale_qs.delete()
+
+    total = confirmed_deleted + stale_deleted
+    if total:
+        logger.info(
+            "[MediaCleanup] deleted %d blob(s) (confirmed=%d, hard_ttl=%d)",
+            total,
+            confirmed_deleted,
+            stale_deleted,
+        )
+    return {
+        "deleted": total,
+        "confirmed": confirmed_deleted,
+        "hard_ttl": stale_deleted,
+    }
