@@ -371,3 +371,30 @@ class PendingRegistration(models.Model):
     def is_expired(self) -> bool:
         from django.utils import timezone
         return timezone.now() >= self.expires_at
+
+
+class PasswordResetRequest(models.Model):
+    """A password reset waiting for a 6-digit email verification code."""
+
+    email = models.EmailField(unique=True)
+    code_hash = models.CharField(max_length=255)
+    expires_at = models.DateTimeField()
+
+    attempts = models.PositiveIntegerField(default=0)
+    resends = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_sent_at = models.DateTimeField(auto_now_add=True)
+
+    MAX_ATTEMPTS = 5
+    MAX_RESENDS = 5
+    RESEND_COOLDOWN_SECONDS = 30
+    TTL_SECONDS = 10 * 60
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"PasswordResetRequest<{self.email}>"
+
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at

@@ -12,12 +12,15 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from .db_storage import FileBlob
-from .models import BlockedUser, Contact, PendingRegistration, UserDevice
+from .models import BlockedUser, Contact, PasswordResetRequest, PendingRegistration, UserDevice
 from .serializers import (
     AccountDeleteSerializer,
     BlockedUserSerializer,
     ContactSerializer,
     PasswordChangeSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
+    PasswordResetVerifySerializer,
     RegistrationRequestSerializer,
     RegistrationResendSerializer,
     RegistrationVerifySerializer,
@@ -194,6 +197,269 @@ def _send_verification_email(email: str, code: str) -> None:
             )
 
     threading.Thread(target=_do_send, daemon=True).start()
+
+
+def _send_password_reset_email(email: str, code: str) -> None:
+    """Send the 6-digit password reset email to a user."""
+    import logging
+    import threading
+    from django.conf import settings
+
+    subject = "Reset your Axonic password"
+    body = (
+        f"Your Axonic password reset code is: {code}\n\n"
+        f"This code expires in 10 minutes. If you did not request a password reset, "
+        f"you can safely ignore this email.\n"
+    )
+
+    logger = logging.getLogger(__name__)
+
+    def _send_via_resend() -> None:
+        import requests
+
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            json={
+                "from": settings.DEFAULT_FROM_EMAIL,
+                "to": [email],
+                "subject": subject,
+                "text": body,
+            },
+            headers={
+                "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=settings.EMAIL_TIMEOUT,
+        )
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Resend returned {resp.status_code}: {resp.text[:300]}")
+
+    def _send_via_sendgrid() -> None:
+        import requests
+
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json={
+                "personalizations": [{"to": [{"email": email}]}],
+                "from": {"email": settings.DEFAULT_FROM_EMAIL},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": body}],
+            },
+            headers={
+                "Authorization": f"Bearer {settings.SENDGRID_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=settings.EMAIL_TIMEOUT,
+        )
+        if resp.status_code >= 300:
+            raise RuntimeError(f"SendGrid returned {resp.status_code}: {resp.text[:300]}")
+
+    def _send_via_smtp() -> None:
+        import socket as _socket
+        from django.core.mail import send_mail
+
+        original_getaddrinfo = _socket.getaddrinfo
+
+        def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            return original_getaddrinfo(host, port, _socket.AF_INET, type, proto, flags)
+
+        try:
+            _socket.getaddrinfo = _ipv4_only_getaddrinfo
+            send_mail(
+                subject=subject,
+                message=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+        finally:
+            _socket.getaddrinfo = original_getaddrinfo
+
+    def _do_send() -> None:
+        if settings.RESEND_API_KEY:
+            transport = "resend"
+            sender = _send_via_resend
+        elif settings.SENDGRID_API_KEY:
+            transport = "sendgrid"
+            sender = _send_via_sendgrid
+        else:
+            transport = "smtp"
+            sender = _send_via_smtp
+        try:
+            sender()
+        except Exception:
+            logger.exception(
+                "Failed to send password reset email to %s (transport=%s)",
+                email,
+                transport,
+            )
+
+    threading.Thread(target=_do_send, daemon=True).start()
+
+
+class PasswordResetRequestView(APIView):
+    """Step 1: email a 6-digit reset code to an account owner."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("password_reset_request"),)
+
+    def post(self, request):
+        from datetime import timedelta
+
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({"email": email, "expires_in": PasswordResetRequest.TTL_SECONDS}, status=status.HTTP_200_OK)
+
+        code = _generate_code()
+        now = timezone.now()
+        expires_at = now + timedelta(seconds=PasswordResetRequest.TTL_SECONDS)
+
+        PasswordResetRequest.objects.update_or_create(
+            email=email,
+            defaults={
+                "code_hash": _hash_code(code),
+                "expires_at": expires_at,
+                "attempts": 0,
+                "resends": 0,
+                "last_sent_at": now,
+            },
+        )
+
+        try:
+            _send_password_reset_email(email, code)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Failed to send password reset email to %s", email)
+            PasswordResetRequest.objects.filter(email=email).delete()
+            return Response({"detail": "Could not send password reset email. Please try again in a moment."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        return Response({"email": email, "expires_in": PasswordResetRequest.TTL_SECONDS}, status=status.HTTP_200_OK)
+
+
+class PasswordResetResendView(APIView):
+    """Regenerate the reset code with a cooldown and resends cap."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("password_reset_resend"),)
+
+    def post(self, request):
+        from datetime import timedelta
+
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        try:
+            pending = PasswordResetRequest.objects.get(email=email)
+        except PasswordResetRequest.DoesNotExist:
+            return Response({"detail": "No password reset request for that email."}, status=status.HTTP_404_NOT_FOUND)
+
+        now = timezone.now()
+        cooldown = timedelta(seconds=PasswordResetRequest.RESEND_COOLDOWN_SECONDS)
+        if now - pending.last_sent_at < cooldown:
+            wait = int((cooldown - (now - pending.last_sent_at)).total_seconds())
+            return Response({"detail": f"Please wait {wait}s before requesting another code."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        if pending.resends >= PasswordResetRequest.MAX_RESENDS:
+            return Response({"detail": "Too many resends. Please start over."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        code = _generate_code()
+        pending.code_hash = _hash_code(code)
+        pending.expires_at = now + timedelta(seconds=PasswordResetRequest.TTL_SECONDS)
+        pending.attempts = 0
+        pending.resends += 1
+        pending.last_sent_at = now
+        pending.save(update_fields=["code_hash", "expires_at", "attempts", "resends", "last_sent_at"])
+
+        try:
+            _send_password_reset_email(email, code)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Failed to resend password reset email to %s", email)
+            return Response({"detail": "Could not send password reset email. Please try again in a moment."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        return Response({"email": email, "expires_in": PasswordResetRequest.TTL_SECONDS}, status=status.HTTP_200_OK)
+
+
+class PasswordResetVerifyView(APIView):
+    """Step 2: confirm the emailed code without changing the password yet."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("password_reset_verify"),)
+
+    def post(self, request):
+        serializer = PasswordResetVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+        code = serializer.validated_data["code"]
+
+        try:
+            pending = PasswordResetRequest.objects.get(email=email)
+        except PasswordResetRequest.DoesNotExist:
+            return Response({"detail": "No password reset request for that email."}, status=status.HTTP_404_NOT_FOUND)
+
+        if pending.is_expired():
+            pending.delete()
+            return Response({"detail": "Reset code expired. Please request a new one."}, status=status.HTTP_410_GONE)
+
+        if pending.attempts >= PasswordResetRequest.MAX_ATTEMPTS:
+            pending.delete()
+            return Response({"detail": "Too many wrong attempts. Please start over."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        if not _check_code(code, pending.code_hash):
+            pending.attempts += 1
+            pending.save(update_fields=["attempts"])
+            remaining = PasswordResetRequest.MAX_ATTEMPTS - pending.attempts
+            return Response({"detail": f"Invalid reset code. {remaining} attempt(s) remaining."}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"email": email, "status": "verified"}, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    """Step 3: validate the final code and set the user's new password."""
+
+    permission_classes = (permissions.AllowAny,)
+    throttle_classes = (_make_throttle("password_reset_confirm"),)
+
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+        code = serializer.validated_data["code"]
+        new_password = serializer.validated_data["new_password"]
+
+        try:
+            pending = PasswordResetRequest.objects.get(email=email)
+        except PasswordResetRequest.DoesNotExist:
+            return Response({"detail": "No password reset request for that email."}, status=status.HTTP_404_NOT_FOUND)
+
+        if pending.is_expired():
+            pending.delete()
+            return Response({"detail": "Reset code expired. Please request a new one."}, status=status.HTTP_410_GONE)
+
+        if pending.attempts >= PasswordResetRequest.MAX_ATTEMPTS:
+            pending.delete()
+            return Response({"detail": "Too many wrong attempts. Please start over."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        if not _check_code(code, pending.code_hash):
+            pending.attempts += 1
+            pending.save(update_fields=["attempts"])
+            return Response({"detail": "Invalid reset code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email).first()
+        if user is None:
+            pending.delete()
+            return Response({"detail": "No account found for that email."}, status=status.HTTP_404_NOT_FOUND)
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        pending.delete()
+
+        return Response({"detail": "Password reset successful."}, status=status.HTTP_200_OK)
 
 
 class RegisterRequestView(APIView):

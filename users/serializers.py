@@ -235,3 +235,40 @@ class RegistrationResendSerializer(serializers.Serializer):
 
     def validate_email(self, value: str) -> str:
         return (value or "").strip().lower()
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    """Ask the server to email a reset code for an existing account."""
+
+    email = serializers.EmailField()
+
+    def validate_email(self, value: str) -> str:
+        value = (value or "").strip().lower()
+        if not value:
+            raise serializers.ValidationError("Email is required.")
+        return value
+
+
+class PasswordResetVerifySerializer(serializers.Serializer):
+    """Validate the 6-digit reset code sent by email."""
+
+    email = serializers.EmailField()
+    code = serializers.RegexField(regex=r"^\d{6}$")
+
+    def validate_email(self, value: str) -> str:
+        return (value or "").strip().lower()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Confirm the reset and set the new password."""
+
+    email = serializers.EmailField()
+    code = serializers.RegexField(regex=r"^\d{6}$")
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_email(self, value: str) -> str:
+        return (value or "").strip().lower()
+
+    def validate_new_password(self, value: str) -> str:
+        validate_password(value)
+        return value

@@ -1,6 +1,26 @@
 {% extends "base.html" %}
 {% block title %}Login — ChatConnect{% endblock %}
 
+{% block extra_css %}
+    .recovery-heading { margin: 4px 0 20px; }
+    .recovery-heading h3 { margin-bottom: 6px; }
+    .recovery-heading p { margin: 0; }
+    .recovery-submit { width: 100%; justify-content: center; margin-bottom: 10px; }
+    .recovery-secondary { margin-top: 2px; }
+    .recovery-code { letter-spacing: 8px; text-align: center; font-size: 1.1rem; }
+    .recovery-back {
+        display: block;
+        margin: 8px auto 0;
+        padding: 4px;
+        border: 0;
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 0.85rem;
+    }
+    .recovery-back:hover { color: var(--text); }
+{% endblock %}
+
 {% block body %}
 <div class="auth-wrapper">
     <div class="auth-card card">
@@ -23,8 +43,48 @@
             </button>
         </form>
 
+        <div id="recovery-panel" hidden>
+            <div class="recovery-heading">
+                <h3>Reset your password</h3>
+                <p id="recovery-description" class="text-muted text-sm">Enter your email to receive a reset code.</p>
+            </div>
+
+            <form id="recovery-request-form">
+                <div class="form-group">
+                    <label for="recovery-email">Email</label>
+                    <input type="email" id="recovery-email" class="form-control" placeholder="you@example.com" required>
+                </div>
+                <button type="submit" class="btn btn-primary recovery-submit">Send reset code</button>
+            </form>
+
+            <form id="recovery-code-form" hidden>
+                <div class="form-group">
+                    <label for="recovery-code">6-digit code</label>
+                    <input type="text" id="recovery-code" class="form-control recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+                    <small id="recovery-expiry" class="text-muted"></small>
+                </div>
+                <button type="submit" class="btn btn-primary recovery-submit">Verify code</button>
+                <button type="button" id="recovery-resend" class="btn btn-outline recovery-submit recovery-secondary" disabled>Resend code</button>
+            </form>
+
+            <form id="recovery-password-form" hidden>
+                <div class="form-group">
+                    <label for="recovery-password">New password</label>
+                    <input type="password" id="recovery-password" class="form-control" placeholder="Min 8 characters" minlength="8" required>
+                </div>
+                <div class="form-group">
+                    <label for="recovery-password-confirm">Confirm new password</label>
+                    <input type="password" id="recovery-password-confirm" class="form-control" placeholder="Repeat your new password" minlength="8" required>
+                </div>
+                <button type="submit" class="btn btn-primary recovery-submit">Update password</button>
+            </form>
+
+            <button type="button" id="cancel-recovery" class="recovery-back">Back to sign in</button>
+        </div>
+
         <p class="text-center text-sm mt-20">
-            Don't have an account? <a href="/register/">Sign up</a>
+            <span id="register-prompt">Don't have an account? <a href="/register/">Sign up</a></span>
+            <a href="#" id="forgot-password-link">Forgot password?</a>
         </p>
     </div>
 </div>
@@ -33,12 +93,97 @@
 {% block scripts %}
 <script>
     const API = '';
+    const alertBox = document.getElementById('alert-box');
+    const loginForm = document.getElementById('login-form');
+    const recoveryPanel = document.getElementById('recovery-panel');
+    const registerPrompt = document.getElementById('register-prompt');
+    const forgotPasswordLink = document.getElementById('forgot-password-link');
+    const cancelRecovery = document.getElementById('cancel-recovery');
+    const requestForm = document.getElementById('recovery-request-form');
+    const codeForm = document.getElementById('recovery-code-form');
+    const passwordForm = document.getElementById('recovery-password-form');
+    const recoveryEmail = document.getElementById('recovery-email');
+    const recoveryCode = document.getElementById('recovery-code');
+    const recoveryExpiry = document.getElementById('recovery-expiry');
+    const resendButton = document.getElementById('recovery-resend');
+    let resetEmail = '';
+    let resetCode = '';
+    let resendTimer = null;
 
-    document.getElementById('login-form').addEventListener('submit', async (e) => {
+    function escapeHtml(value) {
+        const div = document.createElement('div');
+        div.textContent = String(value ?? '');
+        return div.innerHTML;
+    }
+
+    function showAlert(message, type = 'error') {
+        alertBox.innerHTML = `<div class="alert alert-${type}">${escapeHtml(message)}</div>`;
+    }
+
+    function apiError(data, fallback) {
+        if (data && data.detail) return data.detail;
+        if (data && typeof data === 'object') {
+            const messages = Object.values(data).flat().filter(Boolean);
+            if (messages.length) return messages.join(' ');
+        }
+        return fallback;
+    }
+
+    function setRecoveryStep(step) {
+        requestForm.hidden = step !== 'request';
+        codeForm.hidden = step !== 'code';
+        passwordForm.hidden = step !== 'password';
+        document.getElementById('recovery-description').textContent = {
+            request: 'Enter your email to receive a reset code.',
+            code: 'Enter the 6-digit code sent to your email.',
+            password: 'Choose a new password for your account.',
+        }[step];
+    }
+
+    function startResendCooldown(seconds) {
+        if (resendTimer) clearInterval(resendTimer);
+        let remaining = Math.max(0, Number(seconds) || 30);
+        resendButton.disabled = remaining > 0;
+        const update = () => {
+            resendButton.textContent = remaining > 0 ? `Resend code (${remaining}s)` : 'Resend code';
+            resendButton.disabled = remaining > 0;
+            if (remaining <= 0 && resendTimer) {
+                clearInterval(resendTimer);
+                resendTimer = null;
+            }
+            remaining -= 1;
+        };
+        update();
+        if (remaining >= 0) resendTimer = setInterval(update, 1000);
+    }
+
+    function showRecovery() {
+        loginForm.hidden = true;
+        recoveryPanel.hidden = false;
+        registerPrompt.hidden = true;
+        forgotPasswordLink.hidden = true;
+        alertBox.innerHTML = '';
+        setRecoveryStep('request');
+        recoveryEmail.focus();
+    }
+
+    function hideRecovery() {
+        if (resendTimer) clearInterval(resendTimer);
+        loginForm.hidden = false;
+        recoveryPanel.hidden = true;
+        registerPrompt.hidden = false;
+        forgotPasswordLink.hidden = false;
+        alertBox.innerHTML = '';
+        requestForm.reset();
+        codeForm.reset();
+        passwordForm.reset();
+        setRecoveryStep('request');
+    }
+
+    loginForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const username = document.getElementById('username').value;
         const password = document.getElementById('password').value;
-        const alertBox = document.getElementById('alert-box');
 
         try {
             const res = await fetch(`${API}/api/users/token/`, {
@@ -58,6 +203,104 @@
             }
         } catch (err) {
             alertBox.innerHTML = `<div class="alert alert-error">Connection error</div>`;
+        }
+    });
+
+    forgotPasswordLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        showRecovery();
+    });
+
+    cancelRecovery.addEventListener('click', hideRecovery);
+
+    requestForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        resetEmail = recoveryEmail.value.trim();
+        try {
+            const res = await fetch(`${API}/api/users/password/reset/request/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: resetEmail }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(apiError(data, 'Could not send the reset email.'));
+
+            showAlert('If an account exists for that email, a reset code has been sent.', 'success');
+            recoveryExpiry.textContent = `Code expires in ${Math.ceil(data.expires_in / 60)} minutes.`;
+            setRecoveryStep('code');
+            startResendCooldown(30);
+            recoveryCode.focus();
+        } catch (err) {
+            showAlert(err.message || 'Connection error');
+        }
+    });
+
+    codeForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        resetCode = recoveryCode.value.replace(/\D/g, '');
+        if (resetCode.length !== 6) {
+            showAlert('Enter the 6-digit reset code.');
+            return;
+        }
+        try {
+            const res = await fetch(`${API}/api/users/password/reset/verify/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: resetEmail, code: resetCode }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(apiError(data, 'Invalid reset code.'));
+            showAlert('Code verified. Choose a new password.', 'success');
+            setRecoveryStep('password');
+            document.getElementById('recovery-password').focus();
+        } catch (err) {
+            showAlert(err.message || 'Connection error');
+        }
+    });
+
+    resendButton.addEventListener('click', async () => {
+        try {
+            const res = await fetch(`${API}/api/users/password/reset/resend/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: resetEmail }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(apiError(data, 'Could not resend the reset code.'));
+            recoveryCode.value = '';
+            recoveryExpiry.textContent = `Code expires in ${Math.ceil(data.expires_in / 60)} minutes.`;
+            showAlert('A new reset code has been sent.', 'success');
+            startResendCooldown(30);
+            recoveryCode.focus();
+        } catch (err) {
+            showAlert(err.message || 'Connection error');
+        }
+    });
+
+    passwordForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const password = document.getElementById('recovery-password').value;
+        const confirmation = document.getElementById('recovery-password-confirm').value;
+        if (password.length < 8) {
+            showAlert('Password must be at least 8 characters.');
+            return;
+        }
+        if (password !== confirmation) {
+            showAlert('Passwords do not match.');
+            return;
+        }
+        try {
+            const res = await fetch(`${API}/api/users/password/reset/confirm/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: resetEmail, code: resetCode, new_password: password }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(apiError(data, 'Could not reset the password.'));
+            showAlert('Password updated. You can now sign in with your new password.', 'success');
+            setTimeout(hideRecovery, 900);
+        } catch (err) {
+            showAlert(err.message || 'Connection error');
         }
     });
 

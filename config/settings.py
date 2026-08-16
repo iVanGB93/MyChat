@@ -169,6 +169,10 @@ REST_FRAMEWORK = {
         "register_request": "5/hour",
         "register_resend": "5/hour",
         "register_verify": "10/hour",
+        "password_reset_request": "5/hour",
+        "password_reset_resend": "5/hour",
+        "password_reset_verify": "10/hour",
+        "password_reset_confirm": "10/hour",
     },
 }
 

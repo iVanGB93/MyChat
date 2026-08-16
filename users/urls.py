@@ -16,6 +16,10 @@ urlpatterns = [
     path("register/request/", views.RegisterRequestView.as_view(), name="register-request"),
     path("register/verify/", views.RegisterVerifyView.as_view(), name="register-verify"),
     path("register/resend/", views.RegisterResendView.as_view(), name="register-resend"),
+    path("password/reset/request/", views.PasswordResetRequestView.as_view(), name="password-reset-request"),
+    path("password/reset/verify/", views.PasswordResetVerifyView.as_view(), name="password-reset-verify"),
+    path("password/reset/confirm/", views.PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
+    path("password/reset/resend/", views.PasswordResetResendView.as_view(), name="password-reset-resend"),
     path("token/", AxonicTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     # Profile
