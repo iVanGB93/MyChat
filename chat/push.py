@@ -466,12 +466,14 @@ def send_message_push(
     # Expo is the fallback for devices without a raw FCM token.
     sent = False
     if fcm_tokens:
-        fcm_data = dict(data)
-        fcm_data["title"] = sender_name or "New message"
-        fcm_data["body"] = display_body
+        # No title/body here — attaching them makes _send_fcm_data add a
+        # `notification` block, which lets Google Play Services auto-draw a
+        # plain banner (no avatar) and makes our background handler bail out
+        # to avoid a duplicate. Keeping this data-only guarantees our own
+        # MessagingStyle notification (with the sender's avatar) renders.
         sent = _send_fcm_data(
             fcm_tokens=fcm_tokens,
-            data=fcm_data,
+            data=dict(data),
             channel_id="messages",
         ) or sent
     if tokens:
