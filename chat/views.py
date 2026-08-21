@@ -5,10 +5,30 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import ChatRoom, MessageDelivery
+from .models import ChatRoom, GroupMembership, MessageDelivery
 from .serializers import ChatRoomSerializer
 
 User = get_user_model()
+
+
+def notify_room_update(room, recipient_ids=None):
+    """Tell Axion clients to refresh room metadata without sending content.
+
+    Group membership changes are server metadata, so no chat message should be
+    fabricated merely to make the new room visible on another device.
+    """
+    from asgiref.sync import async_to_sync
+    from channels.layers import get_channel_layer
+
+    ids = recipient_ids
+    if ids is None:
+        ids = room.members.values_list("id", flat=True)
+    payload = {"event": "room_update", "room_id": str(room.id)}
+    channel_layer = get_channel_layer()
+    for user_id in set(ids):
+        async_to_sync(channel_layer.group_send)(
+            f"notifications_{user_id}", {"type": "notify", "payload": payload}
+        )
 
 
 class ChatRoomViewSet(viewsets.ModelViewSet):
@@ -19,11 +39,56 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return ChatRoom.objects.filter(
             members=self.request.user
-        ).prefetch_related("members")
+        ).prefetch_related("members", "group_memberships")
 
     def perform_create(self, serializer):
-        room = serializer.save()
-        room.members.add(self.request.user)
+        # Direct rooms must be created through /rooms/direct/, which guarantees
+        # exactly two users.  The generic endpoint is intentionally group-only.
+        if serializer.validated_data.get("room_type") != ChatRoom.GROUP:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"room_type": "Use the direct endpoint for one-to-one chats."})
+
+        name = (serializer.validated_data.get("name") or "").strip()
+        invited = set(serializer.validated_data.get("members", []))
+        invited.discard(self.request.user)
+        if not name:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"name": "A group name is required."})
+        if len(invited) < 2:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"members": "Choose at least two contacts for a group."})
+        self._ensure_invitable(invited)
+
+        room = serializer.save(name=name, room_type=ChatRoom.GROUP)
+        everyone = [self.request.user, *invited]
+        room.members.add(*everyone)
+        GroupMembership.objects.bulk_create([
+            GroupMembership(room=room, user=member, added_by=self.request.user,
+                            role=GroupMembership.ADMIN if member == self.request.user else GroupMembership.MEMBER)
+            for member in everyone
+        ])
+        notify_room_update(room, [member.id for member in everyone])
+
+    def _ensure_invitable(self, users):
+        """Only let a user add people they have accepted as contacts."""
+        from users.models import Contact
+        ids = {user.id for user in users}
+        contact_ids = set(Contact.objects.filter(
+            owner=self.request.user, contact_id__in=ids
+        ).values_list("contact_id", flat=True))
+        if ids != contact_ids:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"members": "Groups can include your accepted contacts only."})
+
+    def _require_group_admin(self, room):
+        if room.room_type != ChatRoom.GROUP:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"room": "This action is only available for groups."})
+        if not GroupMembership.objects.filter(
+            room=room, user=self.request.user, role=GroupMembership.ADMIN
+        ).exists():
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only group admins can do that.")
 
     @action(detail=False, methods=["post"], url_path="direct")
     def get_or_create_direct(self, request):
@@ -70,6 +135,7 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
         Expects: {"user_id": <int>}
         """
         room = self.get_object()
+        self._require_group_admin(room)
         user_id = request.data.get("user_id")
         if not user_id:
             return Response(
@@ -85,9 +151,69 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        if room.members.filter(id=user.id).exists():
+            return Response(self.get_serializer(room).data)
+        self._ensure_invitable({user})
         room.members.add(user)
+        GroupMembership.objects.get_or_create(
+            room=room, user=user,
+            defaults={"added_by": request.user, "role": GroupMembership.MEMBER},
+        )
+        notify_room_update(room)
         serializer = self.get_serializer(room)
         return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="remove-member")
+    def remove_member(self, request, pk=None):
+        room = self.get_object()
+        user_id = request.data.get("user_id")
+        if not user_id:
+            return Response({"error": "user_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if room.room_type != ChatRoom.GROUP:
+            return Response({"error": "Only groups have members to remove."}, status=status.HTTP_400_BAD_REQUEST)
+
+        membership = GroupMembership.objects.filter(room=room, user_id=user_id).first()
+        if not membership:
+            return Response({"error": "User is not in this group."}, status=status.HTTP_404_NOT_FOUND)
+        is_self = membership.user_id == request.user.id
+        if not is_self:
+            self._require_group_admin(room)
+        if membership.role == GroupMembership.ADMIN and GroupMembership.objects.filter(
+            room=room, role=GroupMembership.ADMIN
+        ).count() == 1:
+            return Response({"error": "Assign another admin before the last admin leaves."}, status=status.HTTP_400_BAD_REQUEST)
+
+        recipient_ids = list(room.members.values_list("id", flat=True))
+        room.members.remove(membership.user)
+        membership.delete()
+        notify_room_update(room, recipient_ids)
+        return Response(self.get_serializer(room).data)
+
+    @action(detail=True, methods=["post"], url_path="rename")
+    def rename(self, request, pk=None):
+        room = self.get_object()
+        self._require_group_admin(room)
+        name = str(request.data.get("name") or "").strip()
+        if not name:
+            return Response({"error": "name is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(name) > 120:
+            return Response({"error": "name must be 120 characters or fewer"}, status=status.HTTP_400_BAD_REQUEST)
+        room.name = name
+        room.save(update_fields=["name", "updated_at"])
+        notify_room_update(room)
+        return Response(self.get_serializer(room).data)
+
+    @action(detail=True, methods=["post"], url_path="make-admin")
+    def make_admin(self, request, pk=None):
+        room = self.get_object()
+        self._require_group_admin(room)
+        membership = GroupMembership.objects.filter(room=room, user_id=request.data.get("user_id")).first()
+        if not membership:
+            return Response({"error": "User is not in this group."}, status=status.HTTP_404_NOT_FOUND)
+        membership.role = GroupMembership.ADMIN
+        membership.save(update_fields=["role"])
+        notify_room_update(room)
+        return Response(self.get_serializer(room).data)
 
 
 # ---- HTTP Message Delivery Acknowledgment endpoint ----

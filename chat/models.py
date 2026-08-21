@@ -27,6 +27,49 @@ class ChatRoom(models.Model):
         return self.name or str(self.id)
 
 
+class GroupMembership(models.Model):
+    """Role and audit metadata for a member of a group room.
+
+    ``ChatRoom.members`` remains the authoritative, lightweight membership
+    relation used by the realtime and media paths.  This companion row adds
+    the group-specific state without changing that hot relation or breaking
+    existing direct rooms.
+    """
+
+    ADMIN = "admin"
+    MEMBER = "member"
+    ROLES = [(ADMIN, "Admin"), (MEMBER, "Member")]
+
+    room = models.ForeignKey(
+        ChatRoom, on_delete=models.CASCADE, related_name="group_memberships"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="group_memberships",
+    )
+    role = models.CharField(max_length=12, choices=ROLES, default=MEMBER)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="group_members_added",
+    )
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["room", "user"], name="uniq_group_membership_user_room"
+            )
+        ]
+        indexes = [models.Index(fields=["room", "role"])]
+
+    def __str__(self) -> str:
+        return f"{self.room_id}:{self.user_id} ({self.role})"
+
+
 # NOTE: The legacy `Message` model has been removed. Messages are relayed
 # in real-time over the chat WebSocket and stored client-side only. The
 # server retains no message history.
