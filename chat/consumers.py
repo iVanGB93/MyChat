@@ -1465,6 +1465,130 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             # Any valid authenticated frame means this session is alive.
             _touch_notification_presence(self.user.id)
 
+            # ---- Axion: shared chat-message relay ----
+            # Chat rooms no longer create their own WebSocket. The single
+            # authenticated notification gateway owns all realtime traffic and
+            # validates membership before a message reaches any recipient.
+            if msg_type == "send_message":
+                room_id = str(data.get("room_id", ""))
+                message_id = str(data.get("id", ""))
+                content = data.get("message", "")
+                message_type = str(data.get("message_type", "text"))
+                created_at = data.get("created_at", timezone.now().isoformat())
+                if not room_id or not message_id or not content:
+                    return
+                plan = await self.prepare_axion_message(room_id, message_id)
+                if not plan:
+                    await self.send(text_data=json.dumps({"type": "server_error", "op": "send_message"}))
+                    return
+                reserved = {"type", "room_id", "id", "message", "message_type", "created_at", "sender", "sender_id", "hydration"}
+                payload = {
+                    "event": "new_message",
+                    "room_id": room_id,
+                    "room_name": plan["room_name"],
+                    "sender": self.user.username,
+                    "sender_id": self.user.id,
+                    "sender_avatar": plan["sender_avatar"],
+                    "content": content,
+                    "message_id": message_id,
+                    "message_type": message_type,
+                    "created_at": created_at,
+                    "correlation_id": f"msg:{message_id}",
+                    "route_reason": "axion",
+                    # Axion is the interactive path; FCM remains the safety
+                    # floor for a device whose process has been killed.
+                    "push_floor": True,
+                }
+                payload.update({k: v for k, v in data.items() if k not in reserved and k not in payload})
+                # Relay immediately on the user groups. group_send works across
+                # Daphne workers and reaches every active device/session.
+                for member_id in plan["recipient_ids"]:
+                    await self.channel_layer.group_send(
+                        f"notifications_{member_id}",
+                        {"type": "notify", "payload": payload},
+                    )
+                # Confirm acceptance before any non-critical background work so
+                # sender UI is never held by notification routing.
+                await self.send(text_data=json.dumps({
+                    "type": "message_server_ack",
+                    "room_id": room_id,
+                    "message_id": message_id,
+                    "correlation_id": f"msg:{message_id}",
+                }))
+                # Push delivery is intentionally detached from the live relay:
+                # an Expo response must never delay either the sender's ACK or
+                # the recipient's Axion frame.
+                asyncio.create_task(self.send_axion_message_push(
+                    recipient_ids=plan["recipient_ids"],
+                    sender_name=self.user.username,
+                    content=content,
+                    room_id=room_id,
+                    room_name=plan["room_name"],
+                    message_id=message_id,
+                    message_type=message_type,
+                    created_at=created_at,
+                    extra_data={k: v for k, v in data.items() if k not in reserved},
+                ))
+                return
+
+            # ---- Axion: room readiness lets peers flush durable outboxes ----
+            if msg_type == "room_ready":
+                room_id = str(data.get("room_id", ""))
+                if not room_id:
+                    return
+                pending_senders = await self.get_pending_senders_for_room_notif(room_id)
+                for sender_id in pending_senders:
+                    await self.channel_layer.group_send(
+                        f"notifications_{sender_id}",
+                        {"type": "notify", "payload": {
+                            "event": "receiver_ready", "room_id": room_id,
+                            "user_id": self.user.id, "username": self.user.username,
+                        }},
+                    )
+                return
+
+            # ---- Axion: mutation and typing relays ----
+            if msg_type == "message_update":
+                room_id = str(data.get("room_id", ""))
+                updates = data.get("updates", [])
+                member_ids = await self.get_room_member_ids(room_id)
+                if not room_id or not updates or self.user.id not in member_ids:
+                    return
+                peer_ids = [member_id for member_id in member_ids if member_id != self.user.id]
+                await self.send(text_data=json.dumps({
+                    "type": "message_update_server_ack", "room_id": room_id,
+                    "updates": [{"id": update.get("id"), "expected_peer_ids": peer_ids}
+                                for update in updates if isinstance(update, dict) and update.get("id")],
+                }))
+                for member_id in peer_ids:
+                    await self.channel_layer.group_send(
+                        f"notifications_{member_id}",
+                        {"type": "notify", "payload": {
+                            "event": "message_update", "room_id": room_id,
+                            "updates": updates, "from_user_id": self.user.id,
+                            "from_username": self.user.username,
+                        }},
+                    )
+                return
+
+            if msg_type == "typing":
+                room_id = str(data.get("room_id", ""))
+                member_ids = await self.get_room_member_ids(room_id)
+                if not room_id or self.user.id not in member_ids:
+                    return
+                for member_id in member_ids:
+                    if member_id == self.user.id:
+                        continue
+                    await self.channel_layer.group_send(
+                        f"notifications_{member_id}",
+                        {"type": "notify", "payload": {
+                            "event": "typing", "room_id": room_id,
+                            "sender_id": self.user.id, "sender": self.user.username,
+                            "is_typing": bool(data.get("is_typing")),
+                        }},
+                    )
+                return
+
             # ---- Message delivery ack (for users who received via notification WS) ----
             if msg_type == "message_ack":
                 message_id = data.get("message_id", "")
@@ -1486,20 +1610,14 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     int(sender_id),
                     self.user.id,
                 )
-                for channel in get_user_notification_channels(int(sender_id)):
-                    await self.channel_layer.send(
-                        channel,
-                        {
-                            "type": "notify",
-                            "payload": {
-                                "event": "message_delivery_ack",
-                                "message_id": message_id,
-                                "by_user_id": self.user.id,
-                                "by_username": self.user.username,
-                                "room_id": room_id,
-                            },
-                        },
-                    )
+                await self.channel_layer.group_send(
+                    f"notifications_{int(sender_id)}",
+                    {"type": "notify", "payload": {
+                        "event": "message_delivery_ack", "message_id": message_id,
+                        "by_user_id": self.user.id, "by_username": self.user.username,
+                        "room_id": room_id,
+                    }},
+                )
                 return
 
             # ---- message_update_ack: recipient confirmed it applied update(s) ----
@@ -1509,20 +1627,14 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 room_id = data.get("room_id", "")
                 if not update_ids or not sender_id or not room_id:
                     return
-                for channel in get_user_notification_channels(int(sender_id)):
-                    await self.channel_layer.send(
-                        channel,
-                        {
-                            "type": "notify",
-                            "payload": {
-                                "event": "message_update_ack",
-                                "room_id": str(room_id),
-                                "update_ids": update_ids,
-                                "by_user_id": self.user.id,
-                                "by_username": self.user.username,
-                            },
-                        },
-                    )
+                await self.channel_layer.group_send(
+                    f"notifications_{int(sender_id)}",
+                    {"type": "notify", "payload": {
+                        "event": "message_update_ack", "room_id": str(room_id),
+                        "update_ids": update_ids, "by_user_id": self.user.id,
+                        "by_username": self.user.username,
+                    }},
+                )
                 return
 
             # ---- Call invite ack (callee confirms incoming_call reached app) ----
@@ -1792,6 +1904,103 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         if not room.members.filter(id=self.user.id).exists():
             return []
         return list(room.members.values_list("id", flat=True))
+
+    @database_sync_to_async
+    def prepare_axion_message(self, room_id: str, message_id: str) -> dict | None:
+        """Validate one Axion message and create its durable delivery rows.
+
+        This deliberately combines the membership, blocker and delivery work in
+        one database hop. The hot relay path then only has group sends.
+        """
+        try:
+            room = ChatRoom.objects.get(id=room_id)
+        except ChatRoom.DoesNotExist:
+            return None
+        if not room.members.filter(id=self.user.id).exists():
+            return None
+        from users.models import BlockedUser
+        blockers = set(
+            BlockedUser.objects.filter(blocked=self.user).values_list("owner_id", flat=True)
+        )
+        recipient_ids = [
+            member_id for member_id in room.members.exclude(id=self.user.id).values_list("id", flat=True)
+            if member_id not in blockers
+        ]
+        for recipient_id in recipient_ids:
+            MessageDelivery.objects.get_or_create(
+                room_id=room_id,
+                message_id=message_id,
+                sender_id=self.user.id,
+                recipient_id=recipient_id,
+                defaults={"status": MessageDelivery.STATUS_PENDING},
+            )
+            PendingDelivery.objects.get_or_create(
+                room_id=room_id,
+                from_user_id=self.user.id,
+                to_user_id=recipient_id,
+            )
+        if room.room_type == ChatRoom.DIRECT and not room.name:
+            room_name = self.user.username
+        else:
+            room_name = room.name or str(room.id)
+        try:
+            sender_avatar = self.user.avatar.url if self.user.avatar and self.user.avatar.name else None
+        except Exception:
+            sender_avatar = None
+        return {
+            "recipient_ids": recipient_ids,
+            "room_name": room_name,
+            "sender_avatar": sender_avatar,
+        }
+
+    @database_sync_to_async
+    def get_pending_senders_for_room_notif(self, room_id: str) -> list[int]:
+        if not ChatRoom.objects.filter(id=room_id, members=self.user).exists():
+            return []
+        return list(
+            PendingDelivery.objects.filter(room_id=room_id, to_user=self.user)
+            .values_list("from_user_id", flat=True)
+        )
+
+    @database_sync_to_async
+    def send_axion_message_push(
+        self,
+        recipient_ids: list[int],
+        sender_name: str,
+        content: str,
+        room_id: str,
+        room_name: str,
+        message_id: str,
+        message_type: str,
+        created_at: str,
+        extra_data: dict,
+    ) -> None:
+        if not recipient_ids:
+            return
+        sent = send_message_push(
+            recipient_ids=recipient_ids,
+            sender_name=sender_name,
+            content=content,
+            room_id=room_id,
+            room_name=room_name,
+            correlation_id=f"msg:{message_id}",
+            route_reason="axion_push_floor",
+            message_id=message_id,
+            sender_id=self.user.id,
+            message_type=message_type,
+            created_at=created_at,
+            extra_data=extra_data,
+        )
+        if sent:
+            MessageDelivery.objects.filter(
+                room_id=room_id,
+                message_id=message_id,
+                recipient_id__in=recipient_ids,
+            ).update(
+                push_sent_at=timezone.now(),
+                routed_via=MessageDelivery.ROUTE_PUSH,
+                routed_at=timezone.now(),
+            )
 
     @database_sync_to_async
     def mark_message_delivery_acked_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
