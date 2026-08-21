@@ -15,7 +15,7 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
-from .models import ChatRoom, PendingDelivery, MessageDelivery
+from .models import ChatRoom, PendingDelivery, MessageDelivery, OfflineEmailNudge
 from .push import send_message_push
 from users.models import UserDevice, UserPresence
 
@@ -44,6 +44,53 @@ _decision_audit: deque[dict] = deque(maxlen=500)
 WS_AUTH_TIMEOUT_SECONDS = 10.0
 MESSAGE_ACK_TIMEOUT_SECONDS = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
 PRESENCE_STALE_SECONDS = int(getattr(settings, "PRESENCE_STALE_SECONDS", 70))
+OFFLINE_EMAIL_COOLDOWN_HOURS = int(getattr(settings, "OFFLINE_EMAIL_COOLDOWN_HOURS", 24))
+
+
+def _send_offline_message_email(recipient_email: str, recipient_name: str, sender_name: str) -> None:
+    """Send a content-free, best-effort offline message nudge in a thread."""
+    subject = f"{sender_name} sent you a message on Axonic"
+    app_url = settings.AXONIC_APP_DOWNLOAD_URL
+    body = (
+        f"Hi {recipient_name},\n\n"
+        f"{sender_name} sent you a message on Axonic.\n\n"
+        f"Open Axonic to read and reply: {app_url}\n\n"
+        "For your privacy, this email does not include message content. "
+        "You can change offline email notifications in your Axonic profile.\n"
+    )
+
+    def send() -> None:
+        try:
+            if settings.RESEND_API_KEY:
+                import requests
+                response = requests.post(
+                    "https://api.resend.com/emails",
+                    json={"from": settings.DEFAULT_FROM_EMAIL, "to": [recipient_email], "subject": subject, "text": body},
+                    headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}", "Content-Type": "application/json"},
+                    timeout=settings.EMAIL_TIMEOUT,
+                )
+                response.raise_for_status()
+            elif settings.SENDGRID_API_KEY:
+                import requests
+                response = requests.post(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    json={
+                        "personalizations": [{"to": [{"email": recipient_email}]}],
+                        "from": {"email": settings.DEFAULT_FROM_EMAIL},
+                        "subject": subject,
+                        "content": [{"type": "text/plain", "value": body}],
+                    },
+                    headers={"Authorization": f"Bearer {settings.SENDGRID_API_KEY}", "Content-Type": "application/json"},
+                    timeout=settings.EMAIL_TIMEOUT,
+                )
+                response.raise_for_status()
+            else:
+                from django.core.mail import send_mail
+                send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [recipient_email], fail_silently=False)
+        except Exception:
+            logger.exception("[OfflineEmail] failed recipient=%s", recipient_email)
+
+    threading.Thread(target=send, daemon=True).start()
 
 
 def _get_notification_socket_snapshot(user_id: int) -> tuple[int, str]:
@@ -1529,6 +1576,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     created_at=created_at,
                     extra_data={k: v for k, v in data.items() if k not in reserved},
                 ))
+                if plan["offline_email_recipient_ids"]:
+                    asyncio.create_task(self.queue_offline_email_nudges(
+                        room_id=room_id,
+                        recipient_ids=plan["offline_email_recipient_ids"],
+                    ))
                 return
 
             # ---- Axion: room readiness lets peers flush durable outboxes ----
@@ -1947,11 +1999,71 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             sender_avatar = self.user.avatar.url if self.user.avatar and self.user.avatar.name else None
         except Exception:
             sender_avatar = None
+        # Email is the final fallback only when the recipient has no live Axion
+        # session and no usable push endpoint. Restrict it to an accepted
+        # contact relationship so a message request cannot create inbox spam.
+        from users.models import Contact
+        offline_email_recipient_ids: list[int] = []
+        for recipient in User.objects.filter(id__in=recipient_ids).select_related("profile"):
+            if not recipient.email or not recipient.notif_offline_email_enabled:
+                continue
+            if not Contact.objects.filter(owner_id=recipient.id, contact_id=self.user.id).exists():
+                continue
+            presence = UserPresence.objects.filter(user_id=recipient.id).first()
+            has_live_axion = bool(presence and presence.notification_socket_connected)
+            has_push = UserDevice.objects.filter(
+                user_id=recipient.id,
+                is_active=True,
+                user__notif_messages_enabled=True,
+            ).filter(
+                Q(expo_push_token__startswith="ExponentPushToken[")
+                | Q(expo_push_token__startswith="ExpoPushToken[")
+                | ~Q(fcm_token="")
+            ).exists()
+            if not has_live_axion and not has_push:
+                offline_email_recipient_ids.append(recipient.id)
         return {
             "recipient_ids": recipient_ids,
             "room_name": room_name,
             "sender_avatar": sender_avatar,
+            "offline_email_recipient_ids": offline_email_recipient_ids,
         }
+
+    async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
+        """Reserve one cooldown slot per recipient, then send outside Axion's hot path."""
+        recipients = await self.reserve_offline_email_nudges(room_id, recipient_ids)
+        for recipient in recipients:
+            _send_offline_message_email(
+                recipient_email=recipient["email"],
+                recipient_name=recipient["name"],
+                sender_name=self.user.username,
+            )
+
+    @database_sync_to_async
+    def reserve_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> list[dict]:
+        """Atomically reserve the 24-hour email cooldown before sending."""
+        from datetime import timedelta
+        from django.db import transaction
+
+        now = timezone.now()
+        cooldown = timedelta(hours=OFFLINE_EMAIL_COOLDOWN_HOURS)
+        recipients: list[dict] = []
+        with transaction.atomic():
+            for recipient in User.objects.select_for_update().filter(id__in=recipient_ids):
+                nudge, _created = OfflineEmailNudge.objects.select_for_update().get_or_create(
+                    room_id=room_id,
+                    sender_id=self.user.id,
+                    recipient_id=recipient.id,
+                )
+                if nudge.last_sent_at and now - nudge.last_sent_at < cooldown:
+                    continue
+                nudge.last_sent_at = now
+                nudge.save(update_fields=["last_sent_at", "updated_at"])
+                recipients.append({
+                    "email": recipient.email,
+                    "name": recipient.display_name or recipient.username,
+                })
+        return recipients
 
     @database_sync_to_async
     def get_pending_senders_for_room_notif(self, room_id: str) -> list[int]:

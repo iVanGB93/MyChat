@@ -129,6 +129,33 @@ class MessageDelivery(models.Model):
         return f"{self.message_id} {self.sender_id}->{self.recipient_id} ({self.status})"
 
 
+class OfflineEmailNudge(models.Model):
+    """Database-backed email cooldown for an offline conversation.
+
+    This contains delivery metadata only; no chat content is ever retained on
+    the server. A unique sender/recipient/room row prevents duplicate emails
+    across ASGI workers and deployments.
+    """
+
+    room = models.ForeignKey(ChatRoom, on_delete=models.CASCADE, related_name="offline_email_nudges")
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="offline_email_nudges_sent")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="offline_email_nudges_received")
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["room", "sender", "recipient"],
+                name="uniq_offline_email_nudge_conversation",
+            )
+        ]
+        indexes = [models.Index(fields=["recipient", "last_sent_at"])]
+
+    def __str__(self) -> str:
+        return f"OfflineEmailNudge<{self.sender_id}->{self.recipient_id} {self.room_id}>"
+
+
 class MediaBlob(models.Model):
     """
     Out-of-band storage for large media (image / voice / video) so blobs never

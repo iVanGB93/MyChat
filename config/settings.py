@@ -333,6 +333,12 @@ EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "15"))
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@axonic.app")
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
+# Destination used by offline-message email nudges. Set this to your public
+# landing/download page in production. It deliberately contains no room or
+# message data, so it is safe to include in a notification email.
+AXONIC_APP_DOWNLOAD_URL = os.getenv("AXONIC_APP_DOWNLOAD_URL", "https://chat.qbared.com")
+OFFLINE_EMAIL_COOLDOWN_HOURS = int(os.getenv("OFFLINE_EMAIL_COOLDOWN_HOURS", "24"))
+
 # SendGrid Web API \u2014 used on hosts that block outbound SMTP (e.g. Railway).
 # When SENDGRID_API_KEY is set, _send_verification_email uses the HTTPS API
 # instead of SMTP. Local dev without an API key still uses SMTP/console.

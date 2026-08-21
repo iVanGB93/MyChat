@@ -78,6 +78,10 @@ class User(AbstractUser):
     notif_sound_enabled = models.BooleanField(
         default=True, help_text="Play in-app sound for new messages / calls",
     )
+    notif_offline_email_enabled = models.BooleanField(
+        default=True,
+        help_text="Email me about messages when no app delivery channel is available",
+    )
 
     # ---- Token versioning (used to invalidate all JWTs on demand) ----
     # Bumping this value invalidates every access/refresh token previously
@@ -104,6 +108,7 @@ class User(AbstractUser):
                 "notif_messages_enabled": self.notif_messages_enabled,
                 "notif_calls_enabled": self.notif_calls_enabled,
                 "notif_sound_enabled": self.notif_sound_enabled,
+                "notif_offline_email_enabled": self.notif_offline_email_enabled,
             },
         )
 
@@ -173,6 +178,7 @@ class UserProfile(models.Model):
     notif_messages_enabled = models.BooleanField(default=True)
     notif_calls_enabled = models.BooleanField(default=True)
     notif_sound_enabled = models.BooleanField(default=True)
+    notif_offline_email_enabled = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -194,6 +200,7 @@ class UserProfile(models.Model):
             notif_messages_enabled=self.notif_messages_enabled,
             notif_calls_enabled=self.notif_calls_enabled,
             notif_sound_enabled=self.notif_sound_enabled,
+            notif_offline_email_enabled=self.notif_offline_email_enabled,
         )
         return result
 

@@ -55,6 +55,7 @@ class UserSerializer(serializers.ModelSerializer):
             data["notif_messages_enabled"] = profile.notif_messages_enabled
             data["notif_calls_enabled"] = profile.notif_calls_enabled
             data["notif_sound_enabled"] = profile.notif_sound_enabled
+            data["notif_offline_email_enabled"] = profile.notif_offline_email_enabled
 
         if presence is not None:
             data["is_online"] = presence.is_online
@@ -70,6 +71,7 @@ class UserSerializer(serializers.ModelSerializer):
     notif_messages_enabled = serializers.BooleanField(source="profile.notif_messages_enabled", required=False)
     notif_calls_enabled = serializers.BooleanField(source="profile.notif_calls_enabled", required=False)
     notif_sound_enabled = serializers.BooleanField(source="profile.notif_sound_enabled", required=False)
+    notif_offline_email_enabled = serializers.BooleanField(source="profile.notif_offline_email_enabled", required=False)
     user_tag = serializers.CharField(source="profile.user_tag", read_only=True)
     is_online = serializers.BooleanField(source="presence.is_online", read_only=True)
     last_seen = serializers.DateTimeField(source="presence.last_seen", read_only=True)
@@ -81,7 +83,7 @@ class UserSerializer(serializers.ModelSerializer):
             "display_name", "user_tag",
             "discoverable_by_username", "discoverable_by_email",
             "is_online", "last_seen", "connectivity_mode",
-            "notif_messages_enabled", "notif_calls_enabled", "notif_sound_enabled",
+            "notif_messages_enabled", "notif_calls_enabled", "notif_sound_enabled", "notif_offline_email_enabled",
         )
         read_only_fields = ("id", "is_online", "last_seen", "user_tag")
 
