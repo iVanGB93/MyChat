@@ -29,7 +29,7 @@ from rest_framework.response import Response
 from .models import ChatRoom, MediaBlob, MediaDownload
 
 STREAM_CHUNK = 64 * 1024
-ALLOWED_MEDIA_TYPES = {"image", "voice", "video"}
+ALLOWED_MEDIA_TYPES = {"image", "voice", "video", "document"}
 
 
 def _max_upload_bytes() -> int:
@@ -64,7 +64,7 @@ def upload_media(request):
     Form fields:
       file        (required) the binary blob
       room_id     (required) the room this media belongs to
-      media_type  (required) 'image' | 'voice' | 'video'
+      media_type  (required) 'image' | 'voice' | 'video' | 'document'
       mime        (optional) content-type; falls back to the file's content type
       sha256      (optional) client-computed hex digest for integrity check
       duration_ms, width, height, message_id  (optional)
@@ -162,7 +162,8 @@ def download_media(request, media_id):
     resp["Content-Length"] = str(blob.size_bytes)
     resp["X-Media-Sha256"] = blob.sha256
     resp["X-Media-Md5"] = blob.md5
-    resp["Content-Disposition"] = f'inline; filename="{blob.id}"'
+    disposition = "attachment" if blob.media_type == "document" else "inline"
+    resp["Content-Disposition"] = f'{disposition}; filename="{blob.id}"'
     return resp
 
 

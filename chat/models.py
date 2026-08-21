@@ -148,7 +148,8 @@ class MediaBlob(models.Model):
     IMAGE = "image"
     VOICE = "voice"
     VIDEO = "video"
-    MEDIA_TYPES = [(IMAGE, "Image"), (VOICE, "Voice"), (VIDEO, "Video")]
+    DOCUMENT = "document"
+    MEDIA_TYPES = [(IMAGE, "Image"), (VOICE, "Voice"), (VIDEO, "Video"), (DOCUMENT, "Document")]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     room = models.ForeignKey(
