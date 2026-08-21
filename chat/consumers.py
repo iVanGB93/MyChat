@@ -762,12 +762,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     # Relay to ALL notification sessions (multi-device support).
                     # Pass through every field from msg_data so the apps see the
                     # exact same payload they'd get on the room socket.
+                    try:
+                        sender_avatar = self.user.avatar.url if self.user.avatar and self.user.avatar.name else None
+                    except Exception:
+                        sender_avatar = None
                     notify_payload = {
                         "event": "new_message",
                         "room_id": str(self.room_id),
                         "room_name": room_info["name"],
                         "sender": self.user.username,
                         "sender_id": self.user.id,
+                        "sender_avatar": sender_avatar,
                         "content": message_content,
                         "message_id": message_id,
                         "message_type": message_type_str,

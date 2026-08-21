@@ -449,12 +449,17 @@ def send_message(request):
         relayed_via_ws = False
         will_push = bool(routing_state["push_available"])
         if member_channels:
+            try:
+                sender_avatar = request.user.avatar.url if request.user.avatar and request.user.avatar.name else None
+            except Exception:
+                sender_avatar = None
             notify_payload = {
                 "event": "new_message",
                 "room_id": room_id,
                 "room_name": room_name,
                 "sender": request.user.username,
                 "sender_id": request.user.id,
+                "sender_avatar": sender_avatar,
                 "content": content,
                 "message_id": message_id,
                 "message_type": message_type,
