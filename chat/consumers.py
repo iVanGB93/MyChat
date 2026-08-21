@@ -463,6 +463,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if msg_type == "message_update":
                 updates = data.get("updates", [])
                 if updates:
+                    # Confirm the relay plan before fan-out. The client keeps the
+                    # content locally, but records this membership snapshot so a
+                    # mutation is not marked synced until every peer has acked it.
+                    member_ids = await self.get_room_member_ids_except_self()
+                    await self.send(text_data=json.dumps({
+                        "type": "message_update_server_ack",
+                        "updates": [
+                            {
+                                "id": update.get("id"),
+                                "expected_peer_ids": member_ids,
+                            }
+                            for update in updates
+                            if isinstance(update, dict) and update.get("id")
+                        ],
+                    }))
                     # Relay to all users in the chat-room WebSocket group (sender excluded
                     # by the message_update_broadcast handler below)
                     await self.channel_layer.group_send(
@@ -474,7 +489,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         },
                     )
                     # Also relay via notification channels for members not in the chat WS
-                    member_ids = await self.get_room_member_ids_except_self()
                     for member_id in member_ids:
                         await self.channel_layer.group_send(
                             f"notifications_{member_id}",
