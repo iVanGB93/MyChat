@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}ChatConnect{% endblock %}
+{% block title %}Axonic{% endblock %}
 
 {% block extra_css %}
     /* ===== LAYOUT ===== */
@@ -124,6 +124,11 @@
     .message-sender { font-size: 0.72rem; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
     .message-time { font-size: 0.68rem; color: var(--text-muted); margin-top: 3px; text-align: right; }
     .message-sent .message-time { color: rgba(255,255,255,0.55); }
+    .message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .reaction-pill { background: rgba(255,255,255,0.16); border-radius: 12px; font-size: .75rem; padding: 2px 6px; }
+    .message-received .reaction-pill { background: var(--surface2); }
+    .message.deleted .message-content { color: var(--text-muted); font-style: italic; }
+    .typing-indicator { min-height: 20px; padding: 0 20px 8px; color: var(--text-muted); font-size: .78rem; font-style: italic; }
 
     .chat-input-area {
         padding: 12px 20px; background: var(--surface); border-top: 1px solid var(--border);
@@ -329,7 +334,7 @@
 
 {% block body %}
 <nav class="navbar">
-    <span class="navbar-brand">ChatConnect</span>
+    <span class="navbar-brand">AXONIC</span>
     <div class="navbar-links">
         <span class="text-muted text-sm" id="current-user"></span>
         <a href="#" id="logout-btn" style="color: var(--danger);">Logout</a>
@@ -421,7 +426,7 @@
         <!-- Welcome (no room selected) -->
         <div class="welcome-screen" id="welcome-screen">
             <div class="icon">💬</div>
-            <p style="font-size:1.1rem; font-weight:500; margin-bottom:6px;">Welcome to ChatConnect</p>
+            <p style="font-size:1.1rem; font-weight:500; margin-bottom:6px;">Welcome to Axonic</p>
             <p class="text-sm">Select a contact to chat, or start a voice/video call</p>
         </div>
 
@@ -447,6 +452,7 @@
             <div class="messages-area" id="messages">
                 <div class="empty-chat" id="empty-chat">No messages yet — say hi!</div>
             </div>
+            <div class="typing-indicator" id="typing-indicator" aria-live="polite"></div>
 
             <div class="chat-input-area">
                 <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off">
@@ -791,7 +797,9 @@
     let activeRoomId = null;
     let roomData = null;
     let chatWs = null;
+    let chatWsAuthenticated = false;
     let chatWsReconnectTimer = null;
+    let typingStopTimer = null;
 
     async function openDirectChat(userId) {
         const res = await apiFetch('/api/chat/rooms/direct/', {
@@ -964,7 +972,7 @@
 
     // Flush undelivered outbox messages for a recipient who just connected
     async function flushOutboxForRecipient(roomId, recipientId) {
-        if (!chatWs || chatWs.readyState !== WebSocket.OPEN || activeRoomId !== roomId) return;
+        if (!chatWs || chatWs.readyState !== WebSocket.OPEN || !chatWsAuthenticated || activeRoomId !== roomId) return;
         try {
             const msgs = await idbGetPendingOutbox(roomId, recipientId);
             for (const msg of msgs) {
@@ -987,51 +995,92 @@
 
         await openIDB();
 
-        // One-time migration: pull server history into IndexedDB on first open
-        const migKey = `history_migrated_${activeRoomId}`;
-        if (!localStorage.getItem(migKey)) {
-            try {
-                const res = await apiFetch(`/api/chat/rooms/${activeRoomId}/messages/`);
-                if (res.ok) {
-                    const data = await res.json();
-                    for (const m of (data.results || data)) {
-                        await idbSaveMessage({
-                            id: m.id,
-                            room_id: activeRoomId,
-                            sender_id: m.sender,
-                            sender_name: m.sender_username,
-                            content: m.content,
-                            type: m.message_type,
-                            created_at: m.created_at,
-                            is_mine: m.sender === currentUserId,
-                        });
-                    }
-                    localStorage.setItem(migKey, '1');
-                }
-            } catch { /* ignore — will retry on next open */ }
-        }
-
         const messages = await idbGetMessages(activeRoomId);
         if (messages.length === 0) return;
         const emptyEl = document.getElementById('empty-chat');
         if (emptyEl) emptyEl.remove();
-        container.innerHTML = messages.map(m =>
-            renderMessage(m.sender_name, m.content, m.created_at)
-        ).join('');
+        container.innerHTML = messages.map(renderMessage).join('');
         scrollToBottom();
     }
 
-    function renderMessage(sender, content, createdAt) {
-        const isMine = sender === username;
+    function renderMessage(message) {
+        const sender = message.sender_name || message.sender || '';
+        const content = message.content || message.message || '';
+        const createdAt = message.created_at || new Date().toISOString();
+        const isMine = message.is_mine ?? (sender === username);
         const time = new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const senderLabel = isMine ? '' : `<div class="message-sender">${escapeHtml(sender)}</div>`;
+        const reactions = Object.entries(message.reactions || {}).filter(([, users]) => users?.length)
+            .map(([emoji, users]) => `<span class="reaction-pill">${escapeHtml(emoji)} ${users.length}</span>`).join('');
+        const text = message.is_deleted ? 'This message was deleted' : content;
         return `
-            <div class="message ${isMine ? 'message-sent' : 'message-received'}">
+            <div class="message ${isMine ? 'message-sent' : 'message-received'}${message.is_deleted ? ' deleted' : ''}" data-msg-id="${escapeHtml(message.id || '')}">
                 ${senderLabel}
-                <div>${escapeHtml(content)}</div>
+                <div class="message-content">${escapeHtml(text)}</div>
+                ${reactions ? `<div class="message-reactions">${reactions}</div>` : ''}
                 <div class="message-time">${time}</div>
             </div>
         `;
+    }
+
+    async function idbGetMessage(messageId) {
+        const db = await openIDB();
+        return new Promise((res) => {
+            const req = db.transaction('messages', 'readonly').objectStore('messages').get(messageId);
+            req.onsuccess = () => res(req.result || null);
+            req.onerror = () => res(null);
+        });
+    }
+
+    async function applyMessageUpdates(updates) {
+        for (const update of updates || []) {
+            const message = await idbGetMessage(update.message_id);
+            if (!message) continue;
+            Object.assign(message, update.changes || {});
+            await idbSaveMessage(message);
+            const oldEl = document.querySelector(`[data-msg-id="${CSS.escape(update.message_id)}"]`);
+            if (oldEl) oldEl.outerHTML = renderMessage(message);
+        }
+    }
+
+    function setTypingIndicator(sender, isTyping) {
+        const el = document.getElementById('typing-indicator');
+        if (!isTyping) { el.textContent = ''; return; }
+        el.textContent = `${sender || 'Someone'} is typing…`;
+        clearTimeout(typingStopTimer);
+        typingStopTimer = setTimeout(() => { el.textContent = ''; }, 3000);
+    }
+
+    /**
+     * The backend intentionally relays off-screen messages on both the room
+     * socket and notification socket.  Persisting and rendering here gives the
+     * browser the same reliable fallback as the mobile ingress router: a room
+     * socket reconnect cannot make a received notification invisible.
+     */
+    async function storeIncomingMessage(message, roomId) {
+        const messageId = message.id || message.message_id;
+        if (!messageId) return;
+        const exists = await idbMessageExists(messageId);
+        if (exists) return;
+        const normalized = {
+            id: messageId,
+            room_id: roomId,
+            sender_id: message.sender_id,
+            sender_name: message.sender || message.sender_username || message.from_username || '',
+            content: message.content || message.message || '',
+            type: message.message_type || 'text',
+            created_at: message.created_at || new Date().toISOString(),
+            is_mine: false,
+            reactions: message.reactions || {},
+            is_deleted: Boolean(message.is_deleted),
+        };
+        await idbSaveMessage(normalized);
+        if (String(activeRoomId) !== String(roomId)) return;
+        const emptyEl = document.getElementById('empty-chat');
+        if (emptyEl) emptyEl.remove();
+        document.getElementById('messages').insertAdjacentHTML('beforeend', renderMessage(normalized));
+        scrollToBottom();
+        soundMessageIn();
     }
 
     function escapeHtml(text) {
@@ -1051,14 +1100,15 @@
     function connectChatWS() {
         clearTimeout(chatWsReconnectTimer);
         const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-        const tok = localStorage.getItem('access');
-        chatWs = new WebSocket(`${wsProto}://${location.host}/ws/chat/${activeRoomId}/?token=${tok}`);
+        chatWsAuthenticated = false;
+        // Keep the JWT out of URLs/logs. This is the same post-connect handshake
+        // used by the mobile client and supported by ChatConsumer.
+        chatWs = new WebSocket(`${wsProto}://${location.host}/ws/chat/${activeRoomId}/`);
 
         chatWs.onopen = () => {
             document.getElementById('ws-status').innerHTML =
-                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:4px;"></span>Online';
-            // Announce readiness to receive pending messages from offline senders
-            chatWs.send(JSON.stringify({ type: 'ready_to_receive' }));
+                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:4px;"></span>Connecting…';
+            chatWs.send(JSON.stringify({ type: 'auth', token: currentToken }));
         };
 
         chatWs.onmessage = async (e) => {
@@ -1066,12 +1116,31 @@
                 const msg = JSON.parse(e.data);
                 const msgType = msg.type || '';
 
+                if (msgType === 'auth_ok') {
+                    chatWsAuthenticated = true;
+                    document.getElementById('ws-status').innerHTML =
+                        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:4px;"></span>Online';
+                    chatWs.send(JSON.stringify({ type: 'ready_to_receive' }));
+                    return;
+                }
+                if (msgType === 'auth_failed') { logout(); return; }
                 if (msgType === 'message_server_ack') {
                     console.log('[CHAT WS] server_ack', msg.message_id);
                     return;
                 }
                 if (msgType === 'pong') return;
-                if (msgType === 'messages_read') return;
+                if (msgType === 'messages_read') {
+                    await applyMessageUpdates((msg.message_ids || []).map((message_id) => ({ message_id, changes: { status: 'read', is_read: true } })));
+                    return;
+                }
+                if (msgType === 'message_update') {
+                    await applyMessageUpdates(msg.updates);
+                    if (msg.updates?.length && msg.sender_id) {
+                        chatWs.send(JSON.stringify({ type: 'message_update_ack', room_id: activeRoomId, sender_id: msg.sender_id, update_ids: msg.updates.map((u) => u.id).filter(Boolean) }));
+                    }
+                    return;
+                }
+                if (msgType === 'typing') { setTypingIndicator(msg.sender, msg.is_typing); return; }
 
                 const sender = msg.sender || msg.sender_username;
                 const msgId = msg.id;
@@ -1088,23 +1157,21 @@
                         type: msg.message_type || 'text',
                         created_at: msg.created_at || new Date().toISOString(),
                         is_mine: msg.sender_id === currentUserId,
+                        reactions: msg.reactions || {},
+                        is_deleted: Boolean(msg.is_deleted),
                     });
                     // Only render messages from others (own messages rendered on send)
                     if (msg.sender_id !== currentUserId) {
                         const emptyEl = document.getElementById('empty-chat');
                         if (emptyEl) emptyEl.remove();
                         const container = document.getElementById('messages');
-                        container.insertAdjacentHTML('beforeend', renderMessage(
-                            sender,
-                            msg.content || msg.message,
-                            msg.created_at || new Date().toISOString()
-                        ));
+                        container.insertAdjacentHTML('beforeend', renderMessage(msg));
                         scrollToBottom();
                         soundMessageIn();
                     }
                 }
                 // Ack messages from other users so PendingDelivery is cleared
-                if (msg.sender_id !== currentUserId && chatWs.readyState === WebSocket.OPEN) {
+                if (msg.sender_id !== currentUserId && chatWs.readyState === WebSocket.OPEN && chatWsAuthenticated) {
                     chatWs.send(JSON.stringify({
                         type: 'message_ack',
                         message_id: msgId,
@@ -1117,6 +1184,7 @@
         };
 
         chatWs.onclose = async () => {
+            chatWsAuthenticated = false;
             document.getElementById('ws-status').innerHTML =
                 '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:4px;"></span>Offline';
             await refreshToken();
@@ -1132,7 +1200,7 @@
         const input = document.getElementById('msg-input');
         const text = input.value.trim();
         if (!text) return;
-        if (!chatWs || chatWs.readyState !== WebSocket.OPEN) return;
+        if (!chatWs || chatWs.readyState !== WebSocket.OPEN || !chatWsAuthenticated) return;
 
         const msgId = crypto.randomUUID();
         const createdAt = new Date().toISOString();
@@ -1160,7 +1228,7 @@
         const emptyEl = document.getElementById('empty-chat');
         if (emptyEl) emptyEl.remove();
         const container = document.getElementById('messages');
-        container.insertAdjacentHTML('beforeend', renderMessage(username, text, createdAt));
+        container.insertAdjacentHTML('beforeend', renderMessage({ id: msgId, sender_name: username, content: text, created_at: createdAt, is_mine: true }));
         scrollToBottom();
 
         soundMessageOut();
@@ -1170,6 +1238,16 @@
 
     document.getElementById('msg-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') sendMessage();
+    });
+    document.getElementById('msg-input').addEventListener('input', () => {
+        if (!chatWsAuthenticated || chatWs?.readyState !== WebSocket.OPEN) return;
+        chatWs.send(JSON.stringify({ type: 'typing', is_typing: true }));
+        clearTimeout(typingStopTimer);
+        typingStopTimer = setTimeout(() => {
+            if (chatWsAuthenticated && chatWs?.readyState === WebSocket.OPEN) {
+                chatWs.send(JSON.stringify({ type: 'typing', is_typing: false }));
+            }
+        }, 900);
     });
 
     // =========================================================================
@@ -1186,6 +1264,7 @@
     // NOTIFICATION WEBSOCKET (calls signaling — always connected)
     // =========================================================================
     let notifWs = null;
+    let notifWsAuthenticated = false;
 
     // Call state
     let currentIncomingCall = null;
@@ -1215,12 +1294,26 @@
 
     function connectNotifications() {
         const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-        const tok = localStorage.getItem('access');
-        notifWs = new WebSocket(`${wsProto}://${location.host}/ws/notifications/?token=${tok}`);
+        notifWsAuthenticated = false;
+        notifWs = new WebSocket(`${wsProto}://${location.host}/ws/notifications/`);
+
+        notifWs.onopen = () => {
+            notifWs.send(JSON.stringify({ type: 'auth', token: currentToken }));
+        };
 
         notifWs.onmessage = async (e) => {
             const data = JSON.parse(e.data);
             console.log('[NOTIF]', data);
+
+            if (data.type === 'auth_ok') {
+                notifWsAuthenticated = true;
+                // Match the mobile presence contract so message routing can
+                // distinguish an actively viewed browser from a stale socket.
+                notifWs.send(JSON.stringify({ type: 'app_state', state: 'active' }));
+                return;
+            }
+            if (data.type === 'auth_failed') { logout(); return; }
+            if (data.type === 'pong') return;
 
             // ---- top-level type messages (not event-based) ----
             if (data.type === 'pending_deliveries') {
@@ -1261,23 +1354,13 @@
                     }
                     break;
                 case 'new_message':
-                    // Save to IndexedDB if we're not currently viewing that room
+                    // The notification socket is a first-class delivery path,
+                    // not merely a toast trigger. Persist and render it when
+                    // appropriate so a late room-WS reconnect cannot hide it.
                     if (data.message_id && data.sender_id !== undefined) {
-                        idbMessageExists(data.message_id).then(async (exists) => {
-                            if (!exists) {
-                                await idbSaveMessage({
-                                    id: data.message_id,
-                                    room_id: data.room_id,
-                                    sender_id: data.sender_id,
-                                    sender_name: data.sender || data.from_username || '',
-                                    content: data.content || '',
-                                    type: data.message_type || 'text',
-                                    created_at: data.created_at || new Date().toISOString(),
-                                    is_mine: false,
-                                });
-                            }
+                        storeIncomingMessage(data, data.room_id).then(() => {
                             // Ack so server deletes PendingDelivery
-                            if (notifWs && notifWs.readyState === WebSocket.OPEN) {
+                            if (notifWs && notifWs.readyState === WebSocket.OPEN && notifWsAuthenticated) {
                                 notifWs.send(JSON.stringify({
                                     type: 'message_ack',
                                     message_id: data.message_id,
@@ -1292,12 +1375,15 @@
             }
         };
 
-        notifWs.onclose = () => setTimeout(connectNotifications, 3000);
+        notifWs.onclose = () => {
+            notifWsAuthenticated = false;
+            setTimeout(connectNotifications, 3000);
+        };
         notifWs.onerror = () => notifWs.close();
     }
 
     function sendSignal(targetUserId, signalType, data) {
-        if (!notifWs || notifWs.readyState !== WebSocket.OPEN) {
+        if (!notifWs || notifWs.readyState !== WebSocket.OPEN || !notifWsAuthenticated) {
             console.warn('[SIGNAL] WS not open! state:', notifWs?.readyState);
             return;
         }

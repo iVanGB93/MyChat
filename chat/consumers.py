@@ -927,9 +927,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if sender_id is not None and sender_id != self.user.id:
                 if await self._is_sender_blocked_by_me(sender_id):
                     return
-            if sender_id != self.user.id \
-                    and not await self._is_user_online_async(self.user.id):
-                return
+            # A live room socket is an explicit delivery channel. Do not drop
+            # its frames based on the separate presence flag: mobile browsers
+            # and backgrounded clients can legitimately have a connected room
+            # socket while presence is briefly stale. The notification/push
+            # fan-out below is responsible for deciding notification surfaces;
+            # clients de-duplicate any overlap themselves.
             await self.send(text_data=json.dumps(event["message"]))
         except Exception:
             logger.exception("[ChatConsumer.chat_message] failed user=%s room=%s",
