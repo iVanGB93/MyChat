@@ -1561,6 +1561,30 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "message_id": message_id,
                     "correlation_id": f"msg:{message_id}",
                 }))
+                # Mirror the control acknowledgement through the user's
+                # notification group.  `self.send()` is the fast path, but a
+                # mobile socket can lose that one direct frame while its
+                # channel-layer subscription remains healthy.  The client
+                # treats this idempotently, so the mirror makes acceptance
+                # durable across that narrow race (and reaches another device
+                # logged in as the sender as well).
+                await self.channel_layer.group_send(
+                    self.group_name,
+                    {"type": "notify", "payload": {
+                        "type": "message_server_ack",
+                        "room_id": room_id,
+                        "message_id": message_id,
+                        "correlation_id": f"msg:{message_id}",
+                    }},
+                )
+                logger.info("[Axion] accepted message_id=%s room=%s sender=%s", message_id, room_id, self.user.id)
+                # This is metadata only (message id, room, sender, recipient
+                # and delivery state).  It runs outside the acknowledgement
+                # path and gives reconnects a correct delivery fallback if a
+                # live receipt frame is missed.
+                asyncio.create_task(self.record_axion_message_deliveries(
+                    room_id, message_id, plan["recipient_ids"],
+                ))
                 # This metadata is only an offline wake-up hint; never allow a
                 # contended database write (especially for a group) to delay
                 # the sender's durable local-outbox acknowledgement.
@@ -2050,6 +2074,35 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             ignore_conflicts=True,
         )
 
+    @database_sync_to_async
+    def record_axion_message_deliveries(
+        self,
+        room_id: str,
+        message_id: str,
+        recipient_ids: list[int],
+    ) -> None:
+        """Persist minimal delivery metadata without delaying the Axion relay.
+
+        `ignore_conflicts` is intentional: an especially fast recipient can
+        acknowledge before this task runs, in which case the ACK handler has
+        already inserted the authoritative delivered row.
+        """
+        if not message_id or not recipient_ids:
+            return
+        MessageDelivery.objects.bulk_create(
+            [
+                MessageDelivery(
+                    room_id=room_id,
+                    message_id=message_id,
+                    sender_id=self.user.id,
+                    recipient_id=recipient_id,
+                    status=MessageDelivery.STATUS_PENDING,
+                )
+                for recipient_id in recipient_ids
+            ],
+            ignore_conflicts=True,
+        )
+
     async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
         """Reserve one cooldown slot per recipient, then send outside Axion's hot path."""
         recipients = await self.reserve_offline_email_nudges(room_id, recipient_ids)
@@ -2181,13 +2234,32 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def validate_message_ack_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
-        """Validate a peer delivery tick without persisting per-message state."""
+        """Validate and durably record a peer delivery tick.
+
+        The row contains no message content.  It lets a sender reconcile a
+        receipt after reconnecting, even if the realtime return frame was
+        missed.
+        """
         if not message_id:
             return False
         valid_members = ChatRoom.objects.filter(id=room_id, members=self.user).filter(
             members=sender_id,
         ).exists()
         if valid_members:
+            delivery, created = MessageDelivery.objects.get_or_create(
+                room_id=room_id,
+                message_id=message_id,
+                sender_id=sender_id,
+                recipient_id=self.user.id,
+                defaults={
+                    "status": MessageDelivery.STATUS_DELIVERED,
+                    "delivered_at": timezone.now(),
+                },
+            )
+            if not created and delivery.status != MessageDelivery.STATUS_DELIVERED:
+                delivery.status = MessageDelivery.STATUS_DELIVERED
+                delivery.delivered_at = timezone.now()
+                delivery.save(update_fields=["status", "delivered_at"])
             # One room-level hint is enough: the sender's local outbox owns the
             # actual message history and will retry only what the peer lacks.
             PendingDelivery.objects.filter(
