@@ -1561,6 +1561,14 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "message_id": message_id,
                     "correlation_id": f"msg:{message_id}",
                 }))
+                # This metadata is only an offline wake-up hint; never allow a
+                # contended database write (especially for a group) to delay
+                # the sender's durable local-outbox acknowledgement.
+                if plan["offline_email_recipient_ids"]:
+                    asyncio.create_task(self.record_axion_pending_deliveries(
+                        room_id,
+                        plan["offline_email_recipient_ids"],
+                    ))
                 # Only live Axion recipients use the internal channel relay.
                 # Background/killed recipients take the FCM path below.
                 for member_id in plan["live_recipient_ids"]:
@@ -2002,18 +2010,6 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             recipient_id for recipient_id in recipient_ids
             if not is_user_ws_connected(recipient_id)
         ]
-        if offline_recipient_ids:
-            PendingDelivery.objects.bulk_create(
-                [
-                    PendingDelivery(
-                        room_id=room_id,
-                        from_user_id=self.user.id,
-                        to_user_id=recipient_id,
-                    )
-                    for recipient_id in offline_recipient_ids
-                ],
-                ignore_conflicts=True,
-            )
         if room.room_type == ChatRoom.DIRECT and not room.name:
             room_name = self.user.username
         else:
@@ -2032,6 +2028,27 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             "sender_avatar": sender_avatar,
             "offline_email_recipient_ids": offline_recipient_ids,
         }
+
+    @database_sync_to_async
+    def record_axion_pending_deliveries(
+        self,
+        room_id: str,
+        recipient_ids: list[int],
+    ) -> None:
+        """Persist the compact offline hint outside Axion's acknowledgement path."""
+        if not recipient_ids:
+            return
+        PendingDelivery.objects.bulk_create(
+            [
+                PendingDelivery(
+                    room_id=room_id,
+                    from_user_id=self.user.id,
+                    to_user_id=recipient_id,
+                )
+                for recipient_id in recipient_ids
+            ],
+            ignore_conflicts=True,
+        )
 
     async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
         """Reserve one cooldown slot per recipient, then send outside Axion's hot path."""

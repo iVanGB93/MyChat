@@ -371,11 +371,16 @@ def send_message_push(
     # Prefer FCM data messages (WhatsApp-style background delivery). For devices
     # that have a raw FCM token we send ONLY the FCM data message; Expo is the
     # fallback for devices without one, so a device never gets a double push.
-    fcm_tokens = [f for (_e, f) in device_rows if f]
-    tokens = [
+    # A device can briefly have more than one UserDevice row after a token
+    # rotation or reinstall.  ``distinct()`` above applies to the *pair* of
+    # columns, so it does not prevent the same raw FCM token from occurring in
+    # two rows with different Expo tokens.  De-duplicate at the actual delivery
+    # address to ensure one notification per physical device.
+    fcm_tokens = list(dict.fromkeys(f for (_e, f) in device_rows if f))
+    tokens = list(dict.fromkeys(
         e for (e, f) in device_rows
         if not f and _is_expo_push_token(e)
-    ]
+    ))
     # Notification body. Media messages carry no text content, so show a
     # type-aware placeholder ("📷 Photo" / "🎤 Voice message") instead of a
     # generic "New message".
