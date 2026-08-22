@@ -1566,11 +1566,22 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "message_id": message_id,
                     "correlation_id": f"msg:{message_id}",
                 }))
-                # Live delivery is entirely peer/local-state driven.  Do not
-                # create per-message server records or call FCM here: both add
-                # database/network work ahead of the next Axion frame. A peer
-                # that was offline is represented by one PendingDelivery row
-                # and asks the sender's durable local outbox to resend on join.
+                # Live delivery is peer/local-state driven, so do not create
+                # per-message server records. A peer whose Android background
+                # state has closed Axion gets a data push in a background task;
+                # this persists the message without delaying the relay/ack.
+                if plan["offline_email_recipient_ids"]:
+                    asyncio.create_task(self.send_axion_message_push(
+                        recipient_ids=plan["offline_email_recipient_ids"],
+                        sender_name=self.user.username,
+                        content=content,
+                        room_id=room_id,
+                        room_name=plan["room_name"],
+                        message_id=message_id,
+                        message_type=message_type,
+                        created_at=created_at,
+                        extra_data={k: v for k, v in data.items() if k not in reserved},
+                    ))
                 if plan["offline_email_recipient_ids"]:
                     asyncio.create_task(self.queue_offline_email_nudges(
                         room_id=room_id,
@@ -2009,7 +2020,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """Reserve one cooldown slot per recipient, then send outside Axion's hot path."""
         recipients = await self.reserve_offline_email_nudges(room_id, recipient_ids)
         for recipient in recipients:
-            _send_offline_message_email(
+            # SMTP/HTTP email providers are blocking. Running them on Daphne's
+            # event loop stalls every Axion heartbeat and relay on this worker.
+            await asyncio.to_thread(
+                _send_offline_message_email,
                 recipient_email=recipient["email"],
                 recipient_name=recipient["name"],
                 sender_name=self.user.username,
@@ -2020,7 +2034,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """Atomically reserve the 24-hour email cooldown before sending."""
         from datetime import timedelta
         from django.db import transaction
-        from users.models import Contact
+        from users.models import Contact, UserDevice
 
         now = timezone.now()
         cooldown = timedelta(hours=OFFLINE_EMAIL_COOLDOWN_HOURS)
@@ -2031,6 +2045,19 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 # out of Axion's live relay path.
                 if not Contact.objects.filter(
                     owner_id=recipient.id, contact_id=self.user.id,
+                ).exists():
+                    continue
+                # A logged-in device with a valid push endpoint is reachable
+                # even though Android has suspended its WebSocket. It must get
+                # the data push, not an unnecessary "please open the app" email.
+                if UserDevice.objects.filter(
+                    user_id=recipient.id,
+                    is_active=True,
+                    user__notif_messages_enabled=True,
+                ).filter(
+                    Q(expo_push_token__startswith="ExponentPushToken[")
+                    | Q(expo_push_token__startswith="ExpoPushToken[")
+                    | ~Q(fcm_token="")
                 ).exists():
                     continue
                 nudge, _created = OfflineEmailNudge.objects.select_for_update().get_or_create(
@@ -2069,7 +2096,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         created_at: str,
         extra_data: dict,
     ) -> None:
-        """Send FCM only when Axion delivery has not been acknowledged."""
+        """Legacy delayed fallback; retained for callers outside Axion relay."""
         await asyncio.sleep(MESSAGE_ACK_TIMEOUT_SECONDS)
         await self.send_axion_message_push(
             recipient_ids=recipient_ids,
@@ -2095,23 +2122,13 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         message_type: str,
         created_at: str,
         extra_data: dict,
-    ) -> None:
+    ) -> bool:
         if not recipient_ids:
-            return
-        # A live Axion recipient acknowledges within milliseconds. Do not make
-        # a remote FCM call for those users; it adds load and duplicate delivery
-        # paths without increasing reliability.
-        recipient_ids = list(
-            MessageDelivery.objects.filter(
-                room_id=room_id,
-                message_id=message_id,
-                recipient_id__in=recipient_ids,
-                status=MessageDelivery.STATUS_PENDING,
-                push_sent_at__isnull=True,
-            ).values_list("recipient_id", flat=True)
-        )
-        if not recipient_ids:
-            return
+            return False
+        # Axion's lean relay intentionally does not persist MessageDelivery
+        # rows. The old MessageDelivery-based fallback therefore selected no
+        # recipients and backgrounded Android apps never received a push.
+        # Callers supply only offline recipients, so send directly here.
         sent = send_message_push(
             recipient_ids=recipient_ids,
             sender_name=sender_name,
@@ -2126,16 +2143,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             created_at=created_at,
             extra_data=extra_data,
         )
-        if sent:
-            MessageDelivery.objects.filter(
-                room_id=room_id,
-                message_id=message_id,
-                recipient_id__in=recipient_ids,
-            ).update(
-                push_sent_at=timezone.now(),
-                routed_via=MessageDelivery.ROUTE_PUSH,
-                routed_at=timezone.now(),
-            )
+        return sent
 
     @database_sync_to_async
     def validate_message_ack_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
