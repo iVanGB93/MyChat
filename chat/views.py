@@ -331,30 +331,27 @@ def ack_message_delivery(request):
         # Notify the sender via the notification WS (if connected)
         # that the message was delivered, so they can update UI
         try:
-            from .consumers import get_user_notification_channels
             from channels.layers import get_channel_layer
             from asgiref.sync import async_to_sync
 
             channel_layer = get_channel_layer()
-            sender_channels = get_user_notification_channels(sender_id)
-            if sender_channels:
-                # This is a synchronous view, so there is no running event loop.
-                # Use async_to_sync to push onto the channel layer (asyncio.create_task
-                # would raise "no running event loop" and silently drop the ack).
-                for channel in sender_channels:
-                    async_to_sync(channel_layer.send)(
-                        channel,
-                        {
-                            "type": "notify",
-                            "payload": {
-                                "event": "message_delivery_ack",
-                                "message_id": message_id,
-                                "by_user_id": request.user.id,
-                                "by_username": request.user.username,
-                                "room_id": str(room_id),
-                            },
-                        },
-                    )
+            # A Redis group reaches the sender even when the acknowledgement
+            # request and its Axion socket are served by different Railway
+            # workers.  The old process-local channel list silently lost that
+            # return event in a multi-instance deployment.
+            async_to_sync(channel_layer.group_send)(
+                f"notifications_{sender_id}",
+                {
+                    "type": "notify",
+                    "payload": {
+                        "event": "message_delivery_ack",
+                        "message_id": message_id,
+                        "by_user_id": request.user.id,
+                        "by_username": request.user.username,
+                        "room_id": str(room_id),
+                    },
+                },
+            )
         except Exception as e:
             # Sender notification is nice-to-have; don't fail the ack if it breaks
             import logging
