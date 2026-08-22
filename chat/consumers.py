@@ -1527,7 +1527,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 created_at = data.get("created_at", timezone.now().isoformat())
                 if not room_id or not message_id or not content:
                     return
-                plan = await self.prepare_axion_message(room_id, message_id)
+                plan = await self.prepare_axion_message(room_id)
                 if not plan:
                     await self.send(text_data=json.dumps({"type": "server_error", "op": "send_message"}))
                     return
@@ -1566,21 +1566,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "message_id": message_id,
                     "correlation_id": f"msg:{message_id}",
                 }))
-                # A push is a safety net for an offline/killed device, not a
-                # parallel path for every live recipient.  Waiting for the
-                # acknowledgement prevents expensive FCM work from starving
-                # the single Railway worker that also serves Axion.
-                asyncio.create_task(self.push_axion_fallback_after_timeout(
-                    recipient_ids=plan["recipient_ids"],
-                    sender_name=self.user.username,
-                    content=content,
-                    room_id=room_id,
-                    room_name=plan["room_name"],
-                    message_id=message_id,
-                    message_type=message_type,
-                    created_at=created_at,
-                    extra_data={k: v for k, v in data.items() if k not in reserved},
-                ))
+                # Live delivery is entirely peer/local-state driven.  Do not
+                # create per-message server records or call FCM here: both add
+                # database/network work ahead of the next Axion frame. A peer
+                # that was offline is represented by one PendingDelivery row
+                # and asks the sender's durable local outbox to resend on join.
                 if plan["offline_email_recipient_ids"]:
                     asyncio.create_task(self.queue_offline_email_nudges(
                         room_id=room_id,
@@ -1653,7 +1643,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 room_id = data.get("room_id", "")
                 if not message_id or not sender_id or not room_id:
                     return
-                acked = await self.mark_message_delivery_acked_notif(
+                acked = await self.validate_message_ack_notif(
                     message_id=message_id,
                     sender_id=int(sender_id),
                     room_id=str(room_id),
@@ -1963,11 +1953,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         return list(room.members.values_list("id", flat=True))
 
     @database_sync_to_async
-    def prepare_axion_message(self, room_id: str, message_id: str) -> dict | None:
-        """Validate one Axion message and create its durable delivery rows.
+    def prepare_axion_message(self, room_id: str) -> dict | None:
+        """Validate and plan an Axion relay with minimal server-side work.
 
-        This deliberately combines the membership, blocker and delivery work in
-        one database hop. The hot relay path then only has group sends.
+        Messages live durably on phones. The backend verifies room membership
+        and relays the frame; it only records a compact room-level pending hint
+        for recipients that have no active Axion socket.
         """
         try:
             room = ChatRoom.objects.get(id=room_id)
@@ -1983,18 +1974,21 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             member_id for member_id in room.members.exclude(id=self.user.id).values_list("id", flat=True)
             if member_id not in blockers
         ]
-        for recipient_id in recipient_ids:
-            MessageDelivery.objects.get_or_create(
-                room_id=room_id,
-                message_id=message_id,
-                sender_id=self.user.id,
-                recipient_id=recipient_id,
-                defaults={"status": MessageDelivery.STATUS_PENDING},
-            )
-            PendingDelivery.objects.get_or_create(
-                room_id=room_id,
-                from_user_id=self.user.id,
-                to_user_id=recipient_id,
+        offline_recipient_ids = [
+            recipient_id for recipient_id in recipient_ids
+            if not is_user_ws_connected(recipient_id)
+        ]
+        if offline_recipient_ids:
+            PendingDelivery.objects.bulk_create(
+                [
+                    PendingDelivery(
+                        room_id=room_id,
+                        from_user_id=self.user.id,
+                        to_user_id=recipient_id,
+                    )
+                    for recipient_id in offline_recipient_ids
+                ],
+                ignore_conflicts=True,
             )
         if room.room_type == ChatRoom.DIRECT and not room.name:
             room_name = self.user.username
@@ -2004,34 +1998,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             sender_avatar = self.user.avatar.url if self.user.avatar and self.user.avatar.name else None
         except Exception:
             sender_avatar = None
-        # Email is the final fallback only when the recipient has no live Axion
-        # session and no usable push endpoint. Restrict it to an accepted
-        # contact relationship so a message request cannot create inbox spam.
-        from users.models import Contact
-        offline_email_recipient_ids: list[int] = []
-        for recipient in User.objects.filter(id__in=recipient_ids).select_related("profile"):
-            if not recipient.email or not recipient.notif_offline_email_enabled:
-                continue
-            if not Contact.objects.filter(owner_id=recipient.id, contact_id=self.user.id).exists():
-                continue
-            presence = UserPresence.objects.filter(user_id=recipient.id).first()
-            has_live_axion = bool(presence and presence.notification_socket_connected)
-            has_push = UserDevice.objects.filter(
-                user_id=recipient.id,
-                is_active=True,
-                user__notif_messages_enabled=True,
-            ).filter(
-                Q(expo_push_token__startswith="ExponentPushToken[")
-                | Q(expo_push_token__startswith="ExpoPushToken[")
-                | ~Q(fcm_token="")
-            ).exists()
-            if not has_live_axion and not has_push:
-                offline_email_recipient_ids.append(recipient.id)
         return {
             "recipient_ids": recipient_ids,
             "room_name": room_name,
             "sender_avatar": sender_avatar,
-            "offline_email_recipient_ids": offline_email_recipient_ids,
+            "offline_email_recipient_ids": offline_recipient_ids,
         }
 
     async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
@@ -2049,12 +2020,19 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """Atomically reserve the 24-hour email cooldown before sending."""
         from datetime import timedelta
         from django.db import transaction
+        from users.models import Contact
 
         now = timezone.now()
         cooldown = timedelta(hours=OFFLINE_EMAIL_COOLDOWN_HOURS)
         recipients: list[dict] = []
         with transaction.atomic():
             for recipient in User.objects.select_for_update().filter(id__in=recipient_ids):
+                # Preserve the request-safety rule while keeping this check
+                # out of Axion's live relay path.
+                if not Contact.objects.filter(
+                    owner_id=recipient.id, contact_id=self.user.id,
+                ).exists():
+                    continue
                 nudge, _created = OfflineEmailNudge.objects.select_for_update().get_or_create(
                     room_id=room_id,
                     sender_id=self.user.id,
@@ -2160,33 +2138,22 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             )
 
     @database_sync_to_async
-    def mark_message_delivery_acked_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
-        now = timezone.now()
-        updated = MessageDelivery.objects.filter(
-            room_id=room_id,
-            message_id=message_id,
-            sender_id=sender_id,
-            recipient_id=self.user.id,
-            status=MessageDelivery.STATUS_PENDING,
-        ).update(
-            status=MessageDelivery.STATUS_DELIVERED,
-            delivered_at=now,
-        )
-        if not updated:
+    def validate_message_ack_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
+        """Validate a peer delivery tick without persisting per-message state."""
+        if not message_id:
             return False
-        has_pending_from_sender = MessageDelivery.objects.filter(
-            room_id=room_id,
-            sender_id=sender_id,
-            recipient_id=self.user.id,
-            status=MessageDelivery.STATUS_PENDING,
+        valid_members = ChatRoom.objects.filter(id=room_id, members=self.user).filter(
+            members=sender_id,
         ).exists()
-        if not has_pending_from_sender:
+        if valid_members:
+            # One room-level hint is enough: the sender's local outbox owns the
+            # actual message history and will retry only what the peer lacks.
             PendingDelivery.objects.filter(
                 room_id=room_id,
                 from_user_id=sender_id,
                 to_user_id=self.user.id,
             ).delete()
-        return True
+        return valid_members
 
     @database_sync_to_async
     def mark_call_invite_acked(self, call_id: str) -> bool:
