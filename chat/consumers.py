@@ -41,7 +41,10 @@ _connected_notification_users: dict[int, dict] = {}
 # { room_id: set[user_id] }
 _connected_chat_users: dict[str, set[int]] = {}
 _decision_audit: deque[dict] = deque(maxlen=500)
-WS_AUTH_TIMEOUT_SECONDS = 10.0
+# Authentication may need to wait for a busy deploy worker/database call after
+# the WebSocket upgrade.  This protects unauthenticated connections without
+# racing legitimate mobile clients on a cold or loaded instance.
+WS_AUTH_TIMEOUT_SECONDS = 35.0
 MESSAGE_ACK_TIMEOUT_SECONDS = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
 PRESENCE_STALE_SECONDS = int(getattr(settings, "PRESENCE_STALE_SECONDS", 70))
 OFFLINE_EMAIL_COOLDOWN_HOURS = int(getattr(settings, "OFFLINE_EMAIL_COOLDOWN_HOURS", 24))
@@ -1542,9 +1545,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "created_at": created_at,
                     "correlation_id": f"msg:{message_id}",
                     "route_reason": "axion",
-                    # Axion is the interactive path; FCM remains the safety
-                    # floor for a device whose process has been killed.
-                    "push_floor": True,
+                    # Axion is the interactive path.  FCM is scheduled only
+                    # if this delivery remains unacknowledged, so a live app
+                    # does not wait behind an unnecessary push request.
+                    "push_floor": False,
                 }
                 payload.update({k: v for k, v in data.items() if k not in reserved and k not in payload})
                 # Relay immediately on the user groups. group_send works across
@@ -1562,10 +1566,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "message_id": message_id,
                     "correlation_id": f"msg:{message_id}",
                 }))
-                # Push delivery is intentionally detached from the live relay:
-                # an Expo response must never delay either the sender's ACK or
-                # the recipient's Axion frame.
-                asyncio.create_task(self.send_axion_message_push(
+                # A push is a safety net for an offline/killed device, not a
+                # parallel path for every live recipient.  Waiting for the
+                # acknowledgement prevents expensive FCM work from starving
+                # the single Railway worker that also serves Axion.
+                asyncio.create_task(self.push_axion_fallback_after_timeout(
                     recipient_ids=plan["recipient_ids"],
                     sender_name=self.user.username,
                     content=content,
@@ -2074,6 +2079,32 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             .values_list("from_user_id", flat=True)
         )
 
+    async def push_axion_fallback_after_timeout(
+        self,
+        recipient_ids: list[int],
+        sender_name: str,
+        content: str,
+        room_id: str,
+        room_name: str,
+        message_id: str,
+        message_type: str,
+        created_at: str,
+        extra_data: dict,
+    ) -> None:
+        """Send FCM only when Axion delivery has not been acknowledged."""
+        await asyncio.sleep(MESSAGE_ACK_TIMEOUT_SECONDS)
+        await self.send_axion_message_push(
+            recipient_ids=recipient_ids,
+            sender_name=sender_name,
+            content=content,
+            room_id=room_id,
+            room_name=room_name,
+            message_id=message_id,
+            message_type=message_type,
+            created_at=created_at,
+            extra_data=extra_data,
+        )
+
     @database_sync_to_async
     def send_axion_message_push(
         self,
@@ -2087,6 +2118,20 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         created_at: str,
         extra_data: dict,
     ) -> None:
+        if not recipient_ids:
+            return
+        # A live Axion recipient acknowledges within milliseconds. Do not make
+        # a remote FCM call for those users; it adds load and duplicate delivery
+        # paths without increasing reliability.
+        recipient_ids = list(
+            MessageDelivery.objects.filter(
+                room_id=room_id,
+                message_id=message_id,
+                recipient_id__in=recipient_ids,
+                status=MessageDelivery.STATUS_PENDING,
+                push_sent_at__isnull=True,
+            ).values_list("recipient_id", flat=True)
+        )
         if not recipient_ids:
             return
         sent = send_message_push(
