@@ -1551,21 +1551,34 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "push_floor": False,
                 }
                 payload.update({k: v for k, v in data.items() if k not in reserved and k not in payload})
-                # Relay immediately on the user groups. group_send works across
-                # Daphne workers and reaches every active device/session.
-                for member_id in plan["recipient_ids"]:
-                    await self.channel_layer.group_send(
-                        f"notifications_{member_id}",
-                        {"type": "notify", "payload": payload},
-                    )
-                # Confirm acceptance before any non-critical background work so
-                # sender UI is never held by notification routing.
+                # Confirm acceptance before routing. A receiver that is in the
+                # Android background has no live Axion socket, so sending an
+                # empty channel-layer group is needless Redis work and must
+                # never make the sender wait.
                 await self.send(text_data=json.dumps({
                     "type": "message_server_ack",
                     "room_id": room_id,
                     "message_id": message_id,
                     "correlation_id": f"msg:{message_id}",
                 }))
+                # Only live Axion recipients use the internal channel relay.
+                # Background/killed recipients take the FCM path below.
+                for member_id in plan["live_recipient_ids"]:
+                    try:
+                        await asyncio.wait_for(
+                            self.channel_layer.group_send(
+                                f"notifications_{member_id}",
+                                {"type": "notify", "payload": payload},
+                            ),
+                            timeout=1.5,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[Axion] live relay unavailable room=%s recipient=%s",
+                            room_id,
+                            member_id,
+                            exc_info=True,
+                        )
                 # Live delivery is peer/local-state driven, so do not create
                 # per-message server records. A peer whose Android background
                 # state has closed Axion gets a data push in a background task;
@@ -2011,6 +2024,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             sender_avatar = None
         return {
             "recipient_ids": recipient_ids,
+            "live_recipient_ids": [
+                recipient_id for recipient_id in recipient_ids
+                if recipient_id not in offline_recipient_ids
+            ],
             "room_name": room_name,
             "sender_avatar": sender_avatar,
             "offline_email_recipient_ids": offline_recipient_ids,
