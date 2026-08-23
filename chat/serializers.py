@@ -45,6 +45,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
     )
     members_detail = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
+    avatar = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatRoom
@@ -52,6 +53,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "room_type",
+            "avatar",
             "members",
             "members_detail",
             "last_message",
@@ -59,6 +61,10 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("id", "created_at", "updated_at")
+
+    def get_avatar(self, obj: ChatRoom) -> str | None:
+        avatar = getattr(obj, "avatar", None)
+        return avatar.url if avatar and getattr(avatar, "name", "") else None
 
     def get_last_message(self, obj: ChatRoom) -> dict | None:
         # Server no longer stores message history — messages are relayed via

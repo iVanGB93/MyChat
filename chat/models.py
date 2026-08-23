@@ -3,6 +3,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from users.db_storage import db_storage
+
 
 class ChatRoom(models.Model):
     """A conversation between two or more users."""
@@ -14,6 +16,11 @@ class ChatRoom(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=120, blank=True, default="")
     room_type = models.CharField(max_length=10, choices=ROOM_TYPES, default=DIRECT)
+    # Kept in the same database-backed storage as profile photos so group
+    # images survive ephemeral application deployments.
+    avatar = models.ImageField(
+        upload_to="group-avatars/", blank=True, null=True, storage=db_storage
+    )
     members = models.ManyToManyField(
         settings.AUTH_USER_MODEL, related_name="chat_rooms", blank=True
     )

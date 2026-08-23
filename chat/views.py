@@ -203,6 +203,28 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
         notify_room_update(room)
         return Response(self.get_serializer(room).data)
 
+    @action(detail=True, methods=["post"], url_path="avatar")
+    def avatar(self, request, pk=None):
+        """Replace a group photo. Only group admins can change it."""
+        room = self.get_object()
+        self._require_group_admin(room)
+        uploaded = request.FILES.get("avatar")
+        if not uploaded:
+            return Response({"error": "avatar is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if uploaded.size > 8 * 1024 * 1024:
+            return Response({"error": "Image must be 8 MB or smaller."}, status=status.HTTP_400_BAD_REQUEST)
+        if not (uploaded.content_type or "").startswith("image/"):
+            return Response({"error": "Please choose an image file."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Remove the previous blob so changing a photo does not leave unused
+        # bytes in the database-backed media storage.
+        if room.avatar and room.avatar.name:
+            room.avatar.delete(save=False)
+        room.avatar = uploaded
+        room.save(update_fields=["avatar", "updated_at"])
+        notify_room_update(room)
+        return Response(self.get_serializer(room).data)
+
     @action(detail=True, methods=["post"], url_path="make-admin")
     def make_admin(self, request, pk=None):
         room = self.get_object()
