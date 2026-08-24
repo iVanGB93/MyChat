@@ -2013,8 +2013,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """Validate and plan an Axion relay with minimal server-side work.
 
         Messages live durably on phones. The backend verifies room membership
-        and relays the frame; it only records a compact room-level pending hint
-        for recipients that have no active Axion socket.
+        and relays the frame; a recipient is considered live only while its
+        app reports an *active*, fresh notification session. A backgrounded
+        Android app can keep its WebSocket alive briefly, but that socket is
+        not a reliable delivery path once the OS freezes the process.
         """
         try:
             room = ChatRoom.objects.get(id=room_id)
@@ -2030,9 +2032,23 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             member_id for member_id in room.members.exclude(id=self.user.id).values_list("id", flat=True)
             if member_id not in blockers
         ]
+        presences = {
+            presence.user_id: presence
+            for presence in UserPresence.objects.filter(user_id__in=recipient_ids)
+        }
+        live_recipient_ids = []
+        for recipient_id in recipient_ids:
+            presence = presences.get(recipient_id)
+            if (
+                presence
+                and presence.notification_socket_connected
+                and presence.app_state == UserPresence.APP_STATE_ACTIVE
+                and not presence.is_stale(PRESENCE_STALE_SECONDS)
+            ):
+                live_recipient_ids.append(recipient_id)
         offline_recipient_ids = [
             recipient_id for recipient_id in recipient_ids
-            if not is_user_ws_connected(recipient_id)
+            if recipient_id not in live_recipient_ids
         ]
         if room.room_type == ChatRoom.DIRECT and not room.name:
             room_name = self.user.username
@@ -2044,10 +2060,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             sender_avatar = None
         return {
             "recipient_ids": recipient_ids,
-            "live_recipient_ids": [
-                recipient_id for recipient_id in recipient_ids
-                if recipient_id not in offline_recipient_ids
-            ],
+            "live_recipient_ids": live_recipient_ids,
             "room_name": room_name,
             "sender_avatar": sender_avatar,
             "offline_email_recipient_ids": offline_recipient_ids,
