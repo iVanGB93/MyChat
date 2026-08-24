@@ -18,6 +18,18 @@ from users.models import UserDevice, UserPresence
 User = get_user_model()
 
 
+def landing_view(request):
+    """Public product page and the stable destination for download links."""
+    return render(
+        request,
+        "landing.html",
+        {
+            "android_store_url": settings.APP_STORE_URL_ANDROID,
+            "ios_store_url": settings.APP_STORE_URL_IOS,
+        },
+    )
+
+
 def app_version_view(request):
     """Public endpoint the mobile app polls on launch to decide whether to
     suggest (or force) an update. No auth — must work before/around login.

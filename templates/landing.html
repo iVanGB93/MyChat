@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#05051a">
+    <meta name="description" content="Axonic brings your conversations, media, and calls together with a fast, dependable connection.">
+    <title>Axonic — Keep every connection close</title>
+    <style>
+        :root {
+            --ink: #f8fbff;
+            --muted: #9aa8c7;
+            --line: rgba(141, 242, 255, .16);
+            --night: #05051a;
+            --night-2: #090b2a;
+            --panel: rgba(13, 20, 58, .72);
+            --cyan: #22d8f2;
+            --cyan-light: #b6f8ff;
+            --violet: #b772ff;
+            --lime: #6df6b7;
+            --shadow: 0 25px 80px rgba(0, 0, 0, .37);
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--night);
+            overflow-x: hidden;
+        }
+        body::before, body::after {
+            content: "";
+            position: fixed;
+            inset: auto;
+            border-radius: 50%;
+            pointer-events: none;
+            filter: blur(2px);
+            z-index: -1;
+        }
+        body::before { width: 48rem; height: 48rem; top: -25rem; right: -19rem; background: radial-gradient(circle, rgba(42, 219, 247, .22), transparent 66%); }
+        body::after { width: 44rem; height: 44rem; top: 36rem; left: -24rem; background: radial-gradient(circle, rgba(176, 94, 255, .16), transparent 68%); }
+        a { color: inherit; text-decoration: none; }
+        .shell { width: min(1130px, calc(100% - 40px)); margin: auto; }
+        .nav {
+            height: 82px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+        }
+        .brand { display: inline-flex; align-items: center; gap: 11px; font-weight: 900; letter-spacing: .16em; font-size: 1.08rem; }
+        .brand-mark { width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid rgba(34,216,242,.7); border-radius: 9px; color: var(--cyan); box-shadow: 0 0 20px rgba(34,216,242,.32); font-size: .78rem; }
+        .nav-links { display: flex; align-items: center; gap: 23px; color: var(--muted); font-size: .91rem; }
+        .nav-links a:hover { color: var(--cyan-light); }
+        .nav-login { border: 1px solid rgba(34,216,242,.42); padding: 9px 14px; border-radius: 10px; color: var(--cyan-light); }
+        .hero { min-height: 650px; display: grid; grid-template-columns: 1.04fr .96fr; align-items: center; gap: 48px; padding: 55px 0 74px; }
+        .eyebrow { display: inline-flex; align-items: center; gap: 8px; color: var(--cyan-light); text-transform: uppercase; letter-spacing: .12em; font-size: .72rem; font-weight: 800; }
+        .eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 13px var(--lime); }
+        h1 { max-width: 700px; margin: 16px 0 18px; font-size: clamp(2.65rem, 6vw, 5.35rem); line-height: .98; letter-spacing: -.065em; }
+        h1 span { color: var(--cyan); text-shadow: 0 0 28px rgba(34,216,242,.2); }
+        .hero-copy { max-width: 555px; color: var(--muted); font-size: 1.08rem; line-height: 1.7; }
+        .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 29px; }
+        .button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 48px; padding: 0 18px; border-radius: 12px; font-size: .94rem; font-weight: 800; transition: transform .18s ease, box-shadow .18s ease, background .18s ease; }
+        .button:hover { transform: translateY(-2px); }
+        .button-primary { color: #021419; background: linear-gradient(135deg, #84f6ff, #23d7f0); box-shadow: 0 12px 30px rgba(34,216,242,.2); }
+        .button-secondary { color: var(--cyan-light); background: rgba(14, 25, 66, .48); border: 1px solid var(--line); }
+        .store-note { margin: 16px 0 0; color: #7382a4; font-size: .77rem; }
+        .store-note strong { color: var(--lime); font-weight: 750; }
+        .phone-stage { position: relative; min-height: 490px; display: grid; place-items: center; }
+        .orbit { position: absolute; width: 400px; height: 400px; border: 1px solid rgba(34,216,242,.12); border-radius: 50%; }
+        .orbit::before, .orbit::after { content: ""; position: absolute; border-radius: 50%; }
+        .orbit::before { width: 9px; height: 9px; top: 34px; right: 43px; background: var(--cyan); box-shadow: 0 0 18px var(--cyan); }
+        .orbit::after { width: 7px; height: 7px; bottom: 50px; left: 28px; background: var(--violet); box-shadow: 0 0 15px var(--violet); }
+        .phone { position: relative; z-index: 1; width: 248px; height: 494px; border: 7px solid #d9fbff; border-radius: 37px; background: linear-gradient(165deg, #071232, #0c1e4d 65%, #071735); box-shadow: 0 0 0 2px rgba(34,216,242,.18), 0 28px 52px rgba(0,0,0,.48), inset 0 0 28px rgba(34,216,242,.1); overflow: hidden; transform: rotate(5deg); }
+        .phone::before { content: ""; position: absolute; z-index: 4; width: 92px; height: 19px; top: 8px; left: 50%; transform: translateX(-50%); border-radius: 0 0 14px 14px; background: #d9fbff; }
+        .phone-top { height: 85px; padding: 38px 18px 0; color: var(--cyan); font-size: .72rem; font-weight: 900; letter-spacing: .13em; }
+        .conversation { padding: 11px 13px; display: grid; gap: 11px; }
+        .bubble { max-width: 82%; padding: 10px 11px; border-radius: 13px 13px 13px 3px; font-size: .67rem; line-height: 1.35; color: #d8e5ff; background: rgba(173, 235, 255, .13); border: 1px solid rgba(184, 250, 255, .11); }
+        .bubble small { display: block; margin-top: 4px; opacity: .52; font-size: .54rem; }
+        .bubble.mine { justify-self: end; border-radius: 13px 13px 3px 13px; color: #002933; background: linear-gradient(135deg, #7cf5ff, #41ddec); }
+        .typing { margin: 12px; padding: 10px 11px; border-radius: 12px; color: #8ceaf4; background: rgba(4, 10, 38, .65); border: 1px solid rgba(34,216,242,.15); font-size: .63rem; }
+        .typing b { color: var(--lime); animation: pulse 1.3s infinite; }
+        .float-card { position: absolute; z-index: 2; padding: 12px 13px; border: 1px solid rgba(159,242,255,.21); border-radius: 13px; background: rgba(10, 19, 54, .78); box-shadow: var(--shadow); backdrop-filter: blur(12px); font-size: .71rem; }
+        .float-card strong { display: block; margin-bottom: 4px; font-size: .78rem; color: var(--cyan-light); }
+        .float-card.one { top: 72px; right: -4px; }
+        .float-card.two { bottom: 76px; left: 6px; }
+        .float-icon { color: var(--lime); margin-right: 5px; }
+        .section { padding: 92px 0; }
+        .section-heading { max-width: 650px; margin-bottom: 35px; }
+        .section-heading h2 { margin: 10px 0 0; font-size: clamp(2rem, 4vw, 3.1rem); letter-spacing: -.045em; }
+        .section-heading p { color: var(--muted); line-height: 1.7; }
+        .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .feature { min-height: 214px; padding: 25px; border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(145deg, rgba(22, 31, 76, .72), rgba(7, 11, 38, .52)); box-shadow: inset 0 1px rgba(255,255,255,.025); }
+        .feature-icon { display: grid; width: 39px; height: 39px; place-items: center; margin-bottom: 18px; border-radius: 12px; color: var(--cyan); background: rgba(34,216,242,.12); font-size: 1.1rem; }
+        .feature h3 { margin: 0 0 9px; font-size: 1.03rem; }
+        .feature p { margin: 0; color: var(--muted); font-size: .89rem; line-height: 1.58; }
+        .connection { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: linear-gradient(90deg, rgba(34,216,242,.04), rgba(183,114,255,.07), rgba(34,216,242,.04)); }
+        .connection-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 45px; align-items: center; }
+        .steps { display: grid; gap: 18px; }
+        .step { display: flex; gap: 14px; align-items: flex-start; }
+        .number { flex: none; display: grid; width: 30px; height: 30px; place-items: center; border-radius: 50%; color: #05141c; background: var(--cyan); font-size: .76rem; font-weight: 900; }
+        .step h3 { margin: 2px 0 4px; font-size: .96rem; }
+        .step p { margin: 0; color: var(--muted); font-size: .86rem; line-height: 1.5; }
+        .download-panel { padding: 31px; border: 1px solid rgba(109,246,183,.23); border-radius: 20px; background: radial-gradient(circle at top right, rgba(109,246,183,.12), transparent 47%), rgba(7, 20, 42, .7); }
+        .download-panel h3 { margin: 0 0 8px; font-size: 1.35rem; }
+        .download-panel p { margin: 0 0 21px; color: var(--muted); line-height: 1.55; }
+        .store-row { display: flex; flex-wrap: wrap; gap: 11px; }
+        .store { display: inline-flex; min-width: 160px; align-items: center; gap: 10px; padding: 10px 13px; border: 1px solid rgba(255,255,255,.12); border-radius: 11px; background: rgba(0,0,0,.27); transition: border-color .2s ease, transform .2s ease; }
+        .store:hover { border-color: var(--cyan); transform: translateY(-2px); }
+        .store.disabled { cursor: default; opacity: .55; }
+        .store.disabled:hover { border-color: rgba(255,255,255,.12); transform: none; }
+        .store-symbol { font-size: 1.45rem; }
+        .store span { display: block; color: var(--muted); font-size: .61rem; }
+        .store b { display: block; font-size: .86rem; }
+        .web-callout { margin-top: 19px; color: var(--muted); font-size: .82rem; }
+        .web-callout a { color: var(--cyan-light); font-weight: 750; }
+        footer { padding: 30px 0 44px; color: #7180a2; font-size: .78rem; }
+        .footer-inner { display: flex; justify-content: space-between; gap: 15px; padding-top: 28px; border-top: 1px solid var(--line); }
+        @keyframes pulse { 50% { opacity: .35; } }
+        @media (max-width: 780px) {
+            .shell { width: min(100% - 28px, 580px); }
+            .nav { height: 70px; }
+            .nav-links a:not(.nav-login) { display: none; }
+            .hero { grid-template-columns: 1fr; padding: 54px 0 54px; text-align: center; }
+            .eyebrow, .actions { justify-content: center; }
+            .hero-copy { margin: auto; }
+            .phone-stage { min-height: 430px; margin-top: -8px; }
+            .phone { transform: rotate(3deg) scale(.9); }
+            .orbit { transform: scale(.86); }
+            .float-card.one { right: 1%; }
+            .float-card.two { left: 2%; }
+            .section { padding: 64px 0; }
+            .features, .connection-grid { grid-template-columns: 1fr; }
+            .connection-grid { gap: 35px; }
+            .footer-inner { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <div class="shell">
+            <nav class="nav" aria-label="Main navigation">
+                <a class="brand" href="/" aria-label="Axonic home"><span class="brand-mark">A</span>AXONIC</a>
+                <div class="nav-links">
+                    <a href="#features">Features</a>
+                    <a href="#download">Download</a>
+                    <a id="nav-login" class="nav-login" href="/login/">Log in on web</a>
+                </div>
+            </nav>
+
+            <section class="hero">
+                <div>
+                    <div class="eyebrow"><i></i> Your connection, in motion</div>
+                    <h1>Stay close.<br><span>Move freely.</span></h1>
+                    <p class="hero-copy">Axonic is a fast, personal space for messages, media, and calls—built to keep the people who matter close, wherever you are.</p>
+                    <div class="actions">
+                        <a class="button button-primary" href="#download">Get Axonic <span aria-hidden="true">↓</span></a>
+                        <a id="hero-login" class="button button-secondary" href="/login/">Use Axonic on web <span aria-hidden="true">↗</span></a>
+                    </div>
+                    <p class="store-note"><strong>●</strong> Your chats stay ready on your device, even while you reconnect.</p>
+                </div>
+                <div class="phone-stage" aria-label="Axonic chat preview">
+                    <div class="orbit"></div>
+                    <div class="float-card one"><strong><span class="float-icon">●</span>Axion connected</strong>Ready when you are</div>
+                    <div class="float-card two"><strong>Video calls</strong><span class="float-icon">◉</span>Clear, direct, personal</div>
+                    <div class="phone">
+                        <div class="phone-top">AXONIC</div>
+                        <div class="conversation">
+                            <div class="bubble">Are we still on for tonight?<small>8:42 PM</small></div>
+                            <div class="bubble mine">Absolutely. I’ll call you when I’m home.<small>8:43 PM · ✓✓</small></div>
+                            <div class="bubble">Perfect — see you soon.<small>8:43 PM</small></div>
+                        </div>
+                        <div class="typing"><b>● ● ●</b>  Alex is typing</div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <section id="features" class="section">
+            <div class="shell">
+                <div class="section-heading">
+                    <div class="eyebrow"><i></i> Built around real conversations</div>
+                    <h2>Everything you need to stay in the moment.</h2>
+                </div>
+                <div class="features">
+                    <article class="feature"><div class="feature-icon">↗</div><h3>Messages that keep up</h3><p>Send text, photos, videos, documents, replies, and more through a connection designed to feel immediate.</p></article>
+                    <article class="feature"><div class="feature-icon">◉</div><h3>Voice & video calls</h3><p>Move from a message to a clear one-to-one call without leaving the conversation behind.</p></article>
+                    <article class="feature"><div class="feature-icon">◌</div><h3>Ready on every device</h3><p>Your chat list and call history open from local data first, then quietly catch up in the background.</p></article>
+                </div>
+            </div>
+        </section>
+
+        <section class="connection section">
+            <div class="shell connection-grid">
+                <div>
+                    <div class="section-heading">
+                        <div class="eyebrow"><i></i> One dependable connection</div>
+                        <h2>Axion keeps the conversation moving.</h2>
+                        <p>Axonic uses one smart realtime connection to coordinate chats, delivery updates, calls, and notifications—without making you think about the connection underneath.</p>
+                    </div>
+                    <div class="steps">
+                        <div class="step"><span class="number">1</span><div><h3>Open quickly</h3><p>Your recent chats are available from your phone first.</p></div></div>
+                        <div class="step"><span class="number">2</span><div><h3>Reconnect quietly</h3><p>Axion catches up in the background when the network returns.</p></div></div>
+                        <div class="step"><span class="number">3</span><div><h3>Stay informed</h3><p>Push notifications keep you close when Axonic is not open.</p></div></div>
+                    </div>
+                </div>
+                <aside id="download" class="download-panel">
+                    <h3>Take Axonic with you.</h3>
+                    <p>Download the Android app today. The iPhone version is on its way.</p>
+                    <div class="store-row">
+                        <a class="store" href="{{ android_store_url }}" target="_blank" rel="noopener noreferrer" aria-label="Get Axonic on Google Play"><span class="store-symbol">▶</span><span>GET IT ON<b>Google Play</b></span></a>
+                        {% if ios_store_url %}
+                        <a class="store" href="{{ ios_store_url }}" target="_blank" rel="noopener noreferrer" aria-label="Download Axonic on the App Store"><span class="store-symbol">●</span><span>DOWNLOAD ON THE<b>App Store</b></span></a>
+                        {% else %}
+                        <span class="store disabled" aria-label="Axonic for iPhone coming soon"><span class="store-symbol">●</span><span>COMING SOON TO THE<b>App Store</b></span></span>
+                        {% endif %}
+                    </div>
+                    <p class="web-callout">Already have an account? <a id="panel-login" href="/login/">Open Axonic in your browser →</a></p>
+                </aside>
+            </div>
+        </section>
+    </main>
+    <footer>
+        <div class="shell footer-inner"><span>© {% now "Y" %} Axonic</span><span>Messages · media · calls · connection</span></div>
+    </footer>
+    <script>
+        // The web app stores its session locally. Make the landing CTA useful
+        // for returning users without attempting to inspect any token content.
+        if (localStorage.getItem('access')) {
+            for (const id of ['nav-login', 'hero-login', 'panel-login']) {
+                const link = document.getElementById(id);
+                if (link) {
+                    link.href = '/dashboard/';
+                    if (id === 'nav-login') link.textContent = 'Open web app';
+                    if (id === 'hero-login') link.firstChild.textContent = 'Open Axonic on web ';
+                    if (id === 'panel-login') link.textContent = 'Open your Axonic dashboard →';
+                }
+            }
+        }
+    </script>
+</body>
+</html>

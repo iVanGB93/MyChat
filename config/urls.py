@@ -24,7 +24,7 @@ urlpatterns = [
     # DB-backed media (avatars, etc.) — survives ephemeral filesystems.
     path("media-db/<path:name>", serve_blob, name="media-db"),
     # Web interface (templates)
-    path("", views.login_view, name="home"),
+    path("", views.landing_view, name="home"),
     path("login/", views.login_view, name="login"),
     path("register/", views.register_view, name="register"),
     path("add/<str:user_tag>/", views.invite_tag_view, name="invite-tag"),
