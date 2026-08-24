@@ -8,6 +8,7 @@ import uuid
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics, status
@@ -22,6 +23,7 @@ from users.models import UserDevice
 
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 def _build_ice_servers(connectivity_mode: str = 'auto') -> list[dict]:
@@ -130,6 +132,16 @@ class InitiateCallView(APIView):
                 {"error": "callee_id is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        try:
+            callee_id = int(callee_id)
+        except (TypeError, ValueError):
+            return Response({"error": "callee_id must be a valid user id"}, status=status.HTTP_400_BAD_REQUEST)
+        if callee_id == request.user.id:
+            return Response({"error": "You cannot call yourself"}, status=status.HTTP_400_BAD_REQUEST)
+        if call_type not in (CallLog.VOICE, CallLog.VIDEO):
+            return Response({"error": "call_type must be voice or video"}, status=status.HTTP_400_BAD_REQUEST)
+        if not User.objects.filter(id=callee_id, is_active=True).exists():
+            return Response({"error": "Callee not found"}, status=status.HTTP_404_NOT_FOUND)
 
         room_name = f"call_{uuid.uuid4().hex[:12]}"
 
@@ -287,6 +299,24 @@ class JoinCallView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # A delayed push can open the incoming screen after the caller has
+        # already hung up. Never revive a terminal call to ongoing: it would
+        # leave the callee waiting for a caller that no longer exists.
+        if call.status == CallLog.ONGOING:
+            lk_token = _try_create_livekit_token(call.room_name, request.user.username)
+            return Response({
+                "call_id": str(call.id),
+                "room_name": call.room_name,
+                "call_type": call.call_type,
+                "token": lk_token,
+                "livekit_url": getattr(settings, "LIVEKIT_URL", ""),
+            })
+        if call.status != CallLog.RINGING:
+            return Response(
+                {"error": "This call is no longer available", "status": call.status},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         call.status = CallLog.ONGOING
         if call.invite_acked_at is None:
             call.invite_acked_at = timezone.now()
@@ -342,6 +372,10 @@ class EndCallView(APIView):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
         action = request.data.get("action", "end")  # "end" | "reject"
+        if action not in ("end", "reject"):
+            return Response({"error": "action must be end or reject"}, status=status.HTTP_400_BAD_REQUEST)
+        if call.status in (CallLog.ENDED, CallLog.REJECTED, CallLog.MISSED):
+            return Response({"status": call.status})
         call.status = CallLog.REJECTED if action == "reject" else CallLog.ENDED
         call.ended_at = timezone.now()
         if call.started_at and call.status == CallLog.ENDED:
