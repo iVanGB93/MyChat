@@ -417,17 +417,17 @@ class AxionMessageLifecycleTests(TransactionTestCase):
                     lambda: MessageDelivery.objects.filter(
                         message_id="duplicate-message-1",
                         recipient=self.recipient,
+                        push_sent_at__isnull=False,
                     ).exists()
                 )
                 await asyncio.sleep(0.05)
             finally:
                 await self._disconnect_all(sender_socket)
 
-        with patch.object(
-            NotificationConsumer,
-            "send_axion_message_push",
-            new=AsyncMock(return_value=True),
-        ), patch.object(
+        with patch(
+            "chat.consumers.send_message_push",
+            return_value=True,
+        ) as push_mock, patch.object(
             NotificationConsumer,
             "queue_offline_email_nudges",
             new=AsyncMock(return_value=None),
@@ -441,6 +441,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
             ).count(),
             1,
         )
+        self.assertEqual(push_mock.call_count, 1)
         self.assertEqual(
             PendingDelivery.objects.filter(
                 room=room,
@@ -449,6 +450,102 @@ class AxionMessageLifecycleTests(TransactionTestCase):
             ).count(),
             1,
         )
+
+    def test_group_hydration_targets_one_member_without_push_or_fanout(self):
+        room = self._create_room(
+            ChatRoom.GROUP,
+            include_group_member=True,
+        )
+
+        async def scenario():
+            sender_socket = target_socket = other_socket = None
+            try:
+                sender_socket = await self._connect(self.sender)
+                target_socket = await self._connect(self.recipient)
+                other_socket = await self._connect(self.group_member)
+
+                frame = self._message_frame(room, "group-hydration-1", "Recovered message")
+                frame.update({
+                    "hydration": True,
+                    "target_recipient_id": self.recipient.id,
+                })
+                await sender_socket.send_json_to(frame)
+
+                ack = await self._receive_until(
+                    sender_socket,
+                    lambda item: item.get("type") == "message_server_ack",
+                )
+                self.assertEqual(ack["message_id"], "group-hydration-1")
+                incoming = await self._receive_until(
+                    target_socket,
+                    lambda item: item.get("event") == "new_message",
+                )
+                self.assertTrue(incoming["hydration"])
+                self.assertEqual(incoming["message_id"], "group-hydration-1")
+                self.assertTrue(await other_socket.receive_nothing(timeout=0.15))
+            finally:
+                await self._disconnect_all(sender_socket, target_socket, other_socket)
+
+        with patch("chat.consumers.send_message_push", return_value=True) as push_mock:
+            async_to_sync(scenario)()
+
+        push_mock.assert_not_called()
+        self.assertFalse(
+            MessageDelivery.objects.filter(message_id="group-hydration-1").exists()
+        )
+
+    def test_group_read_receipt_routes_only_to_original_author(self):
+        room = self._create_room(
+            ChatRoom.GROUP,
+            include_group_member=True,
+        )
+
+        async def scenario():
+            reader_socket = author_socket = other_socket = None
+            try:
+                reader_socket = await self._connect(self.recipient)
+                author_socket = await self._connect(self.sender)
+                other_socket = await self._connect(self.group_member)
+
+                await reader_socket.send_json_to({
+                    "type": "message_update",
+                    "room_id": str(room.id),
+                    "updates": [{
+                        "id": "targeted-read-update-1",
+                        "message_id": "group-message-read-1",
+                        "changes": {
+                            "is_read": True,
+                            "receipt_target_id": self.sender.id,
+                        },
+                    }],
+                })
+
+                accepted = await self._receive_until(
+                    reader_socket,
+                    lambda item: item.get("type") == "message_update_server_ack",
+                )
+                self.assertEqual(
+                    accepted["updates"],
+                    [{
+                        "id": "targeted-read-update-1",
+                        "expected_peer_ids": [self.sender.id],
+                    }],
+                )
+                delivered = await self._receive_until(
+                    author_socket,
+                    lambda item: item.get("event") == "message_update",
+                )
+                self.assertEqual(len(delivered["updates"]), 1)
+                self.assertTrue(delivered["updates"][0]["changes"]["is_read"])
+                self.assertNotIn(
+                    "receipt_target_id",
+                    delivered["updates"][0]["changes"],
+                )
+                self.assertTrue(await other_socket.receive_nothing(timeout=0.15))
+            finally:
+                await self._disconnect_all(reader_socket, author_socket, other_socket)
+
+        async_to_sync(scenario)()
 
     def test_stale_persisted_online_flag_is_not_serialized_as_online(self):
         presence = self.sender.presence

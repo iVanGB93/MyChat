@@ -231,16 +231,42 @@ def _send_fcm_data(
             # message (InvalidArgumentError), or a credential/APNs problem
             # (ThirdPartyAuthError). Without this we only saw "success=0
             # failure=1" with no cause.
+            stale_tokens: list[str] = []
             for tok, r in zip([m.token for m in messages], resp.responses):
                 if not r.success:
                     exc = r.exception
+                    exc_type = type(exc).__name__ if exc else ""
+                    exc_code = str(getattr(exc, "code", "") or "")
+                    exc_detail = str(exc) if exc else ""
+                    # FCM guarantees that an unregistered token will never
+                    # become valid again. Prune it immediately so future
+                    # messages do not fan out to every token created by old
+                    # installs of the same device.
+                    if (
+                        exc_type == "UnregisteredError"
+                        or "NotRegistered" in exc_detail
+                        or "registration-token-not-registered" in exc_code
+                    ):
+                        stale_tokens.append(tok)
                     logger.warning(
                         "[FCM] token=…%s FAILED type=%s code=%s detail=%s",
                         (tok[-12:] if tok else "?"),
-                        type(exc).__name__ if exc else "?",
-                        getattr(exc, "code", None),
-                        str(exc) if exc else "",
+                        exc_type or "?",
+                        exc_code or None,
+                        exc_detail,
                     )
+            if stale_tokens:
+                stale_rows = UserDevice.objects.filter(fcm_token__in=stale_tokens)
+                without_fallback_ids = list(
+                    stale_rows.exclude(
+                        Q(expo_push_token__startswith="ExponentPushToken[")
+                        | Q(expo_push_token__startswith="ExpoPushToken[")
+                    ).values_list("id", flat=True)
+                )
+                pruned = stale_rows.update(fcm_token="")
+                if without_fallback_ids:
+                    UserDevice.objects.filter(id__in=without_fallback_ids).update(is_active=False)
+                logger.info("[FCM] pruned %d stale device token(s)", pruned)
             logger.warning(
                 "[FCM] sent %d data message(s) success=%d failure=%d",
                 len(messages), resp.success_count, resp.failure_count,
@@ -404,6 +430,11 @@ def send_message_push(
         "routeReason": route_reason,
         "correlation_id": correlation_id,
         "route_reason": route_reason,
+        # This push carries an OS-rendered notification block. If Android also
+        # wakes the JS background handler, ingress must persist/ack the message
+        # without drawing a second local notification.
+        "pushFloor": "true",
+        "push_floor": "true",
     }
     # Full message payload — lets the app save to SQLite without WS
     if message_id:
@@ -458,28 +489,20 @@ def send_message_push(
                 # Skip oversized values to keep the payload under Expo's limit.
                 continue
             data[k] = sv
-    # DATA-ONLY FCM push for messages: we do NOT attach a `notification` block,
-    # so the app's background handler (setBackgroundMessageHandler) runs and
-    # renders the WhatsApp-style Notifee MessagingStyle notification itself —
-    # one box per conversation, with Reply + Mark-as-read actions. The title/
-    # body ride INSIDE the data payload so the app can render sender + text
-    # (incl. the media placeholder body). Tradeoff vs. the old hybrid banner:
-    # data-only needs the app process to run the handler — the foreground
-    # service keeps it alive for the common (backgrounded) case; a fully
-    # force-stopped / OEM-frozen app is the risk (it may show nothing until
-    # reopened). Calls stay HYBRID (see send_call_push) so ringing is reliable.
-    # Expo is the fallback for devices without a raw FCM token.
+    # HYBRID FCM push: Google Play Services renders the notification even when
+    # Android has frozen or killed the app, while the data payload still lets
+    # the background handler persist and acknowledge the message whenever the
+    # process is allowed to run. This reliability floor is more important than
+    # requiring JavaScript to wake in order to draw a custom MessagingStyle
+    # notification. Expo remains the fallback for devices without raw FCM.
     sent = False
     if fcm_tokens:
-        # No title/body here — attaching them makes _send_fcm_data add a
-        # `notification` block, which lets Google Play Services auto-draw a
-        # plain banner (no avatar) and makes our background handler bail out
-        # to avoid a duplicate. Keeping this data-only guarantees our own
-        # MessagingStyle notification (with the sender's avatar) renders.
         sent = _send_fcm_data(
             fcm_tokens=fcm_tokens,
             data=dict(data),
             channel_id="messages",
+            title=sender_name,
+            body=display_body,
         ) or sent
     if tokens:
         sent = _send_expo_push(
@@ -521,8 +544,12 @@ def send_call_push(
             | ~Q(fcm_token="")
         ).values_list("expo_push_token", "fcm_token").distinct()
     )
-    fcm_tokens = [f for (_e, f) in device_rows if f]
-    tokens = [e for (e, f) in device_rows if not f and _is_expo_push_token(e)]
+    # One physical installation can temporarily have more than one database
+    # row after token rotation. Deliver once per actual push address.
+    fcm_tokens = list(dict.fromkeys(f for (_e, f) in device_rows if f))
+    tokens = list(dict.fromkeys(
+        e for (e, f) in device_rows if not f and _is_expo_push_token(e)
+    ))
     icon = "📹" if call_type == "video" else "📞"
     title = f"{icon} Incoming {call_type} call from {caller_name}"
     body = "Tap to answer or swipe to decline"
@@ -543,15 +570,20 @@ def send_call_push(
         fcm_data = dict(data)
         fcm_data["title"] = title
         fcm_data["body"] = body
-        # DATA-ONLY (like messages): no `notification` block, so the app's FCM
-        # background handler renders the proper CallStyle notification (full-
-        # screen, Accept/Decline, ringtone) instead of a plain OS banner that
-        # looks like a message. title/body ride inside the data for rendering.
+        # HYBRID reliability floor. Android may freeze a cached app process and
+        # decline to wake JavaScript for a data-only message, even at high
+        # priority. The notification block lets Google Play Services ring and
+        # render the incoming call without starting Axonic; the attached data
+        # still opens the correct call and lets the app verify that it remains
+        # active. When JS is allowed to run, the background handler upgrades
+        # this to the richer Notifee CallStyle presentation.
         sent = _send_fcm_data(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
-            channel_id="calls",
+            channel_id="incoming-calls-v2",
             priority="high",
+            title=title,
+            body=body,
             notification_priority="max",
         ) or sent
     if tokens:

@@ -1594,13 +1594,29 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 content = data.get("message", "")
                 message_type = str(data.get("message_type", "text"))
                 created_at = data.get("created_at", timezone.now().isoformat())
+                hydration = data.get("hydration") is True
+                try:
+                    target_recipient_id = int(data.get("target_recipient_id") or 0)
+                except (TypeError, ValueError):
+                    target_recipient_id = 0
                 if not room_id or not message_id or not content:
                     return
                 plan = await self.prepare_axion_message(room_id)
                 if not plan:
                     await self.send(text_data=json.dumps({"type": "server_error", "op": "send_message"}))
                     return
-                reserved = {"type", "room_id", "id", "message", "message_type", "created_at", "sender", "sender_id", "hydration"}
+                if hydration and target_recipient_id not in plan["recipient_ids"]:
+                    await self.send(text_data=json.dumps({
+                        "type": "server_error",
+                        "op": "send_message",
+                        "reason": "invalid_hydration_target",
+                    }))
+                    return
+                reserved = {
+                    "type", "room_id", "id", "message", "message_type",
+                    "created_at", "sender", "sender_id", "hydration",
+                    "target_recipient_id",
+                }
                 payload = {
                     "event": "new_message",
                     "room_id": room_id,
@@ -1618,6 +1634,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     # if this delivery remains unacknowledged, so a live app
                     # does not wait behind an unnecessary push request.
                     "push_floor": False,
+                    **({"hydration": True} if hydration else {}),
                 }
                 payload.update({k: v for k, v in data.items() if k not in reserved and k not in payload})
                 # Confirm acceptance before routing. A receiver that is in the
@@ -1646,7 +1663,35 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         "correlation_id": f"msg:{message_id}",
                     }},
                 )
-                logger.info("[Axion] accepted message_id=%s room=%s sender=%s", message_id, room_id, self.user.id)
+                logger.info(
+                    "[Axion] %s message_id=%s room=%s sender=%s target=%s",
+                    "hydrated" if hydration else "accepted",
+                    message_id,
+                    room_id,
+                    self.user.id,
+                    target_recipient_id or "all",
+                )
+                if hydration:
+                    # Recovery frames are requested by one peer that just came
+                    # online. Never fan them out to other group members and
+                    # never create a second notification/push/email.
+                    if target_recipient_id in plan["live_recipient_ids"]:
+                        try:
+                            await asyncio.wait_for(
+                                self.channel_layer.group_send(
+                                    f"notifications_{target_recipient_id}",
+                                    {"type": "notify", "payload": payload},
+                                ),
+                                timeout=1.5,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "[Axion] hydration relay unavailable room=%s recipient=%s",
+                                room_id,
+                                target_recipient_id,
+                                exc_info=True,
+                            )
+                    return
                 # This is metadata only (message id, room, sender, recipient
                 # and delivery state).  It runs outside the acknowledgement
                 # path and gives reconnects a correct delivery fallback if a
@@ -1727,17 +1772,50 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 if not room_id or not updates or self.user.id not in member_ids:
                     return
                 peer_ids = [member_id for member_id in member_ids if member_id != self.user.id]
+                routed_updates = []
+                expected_by_update_id = {}
+                for update in updates:
+                    if not isinstance(update, dict) or not update.get("id"):
+                        continue
+                    changes = update.get("changes")
+                    changes = dict(changes) if isinstance(changes, dict) else {}
+                    raw_receipt_target = changes.pop("receipt_target_id", None)
+                    try:
+                        receipt_target_id = int(raw_receipt_target or 0)
+                    except (TypeError, ValueError):
+                        receipt_target_id = 0
+                    # Only a read receipt may narrow its route, and only to a
+                    # server-validated room peer. Other mutations still reach
+                    # every member so content converges across all devices.
+                    expected_peers = (
+                        [receipt_target_id]
+                        if changes.get("is_read") is True and receipt_target_id in peer_ids
+                        else peer_ids
+                    )
+                    routed_update = {**update, "changes": changes}
+                    routed_updates.append((routed_update, expected_peers))
+                    expected_by_update_id[update.get("id")] = expected_peers
+                if not routed_updates:
+                    return
                 await self.send(text_data=json.dumps({
                     "type": "message_update_server_ack", "room_id": room_id,
-                    "updates": [{"id": update.get("id"), "expected_peer_ids": peer_ids}
-                                for update in updates if isinstance(update, dict) and update.get("id")],
+                    "updates": [
+                        {"id": update_id, "expected_peer_ids": expected_peers}
+                        for update_id, expected_peers in expected_by_update_id.items()
+                    ],
                 }))
                 for member_id in peer_ids:
+                    member_updates = [
+                        update for update, expected_peers in routed_updates
+                        if member_id in expected_peers
+                    ]
+                    if not member_updates:
+                        continue
                     await self.channel_layer.group_send(
                         f"notifications_{member_id}",
                         {"type": "notify", "payload": {
                             "event": "message_update", "room_id": room_id,
-                            "updates": updates, "from_user_id": self.user.id,
+                            "updates": member_updates, "from_user_id": self.user.id,
                             "from_username": self.user.username,
                         }},
                     )
@@ -2380,12 +2458,55 @@ class NotificationConsumer(AsyncWebsocketConsumer):
     ) -> bool:
         if not recipient_ids:
             return False
-        # Axion's lean relay intentionally does not persist MessageDelivery
-        # rows. The old MessageDelivery-based fallback therefore selected no
-        # recipients and backgrounded Android apps never received a push.
-        # Callers supply only offline recipients, so send directly here.
+        from django.db import transaction
+
+        # Reserve each per-message push before contacting FCM. If the sender
+        # reconnects and replays an accepted message, the same durable delivery
+        # row prevents another notification. A stale reservation becomes
+        # eligible again so a worker crash cannot suppress delivery forever.
+        now = timezone.now()
+        stale_before = now - timedelta(minutes=2)
+        with transaction.atomic():
+            MessageDelivery.objects.bulk_create(
+                [
+                    MessageDelivery(
+                        room_id=room_id,
+                        message_id=message_id,
+                        sender_id=self.user.id,
+                        recipient_id=recipient_id,
+                        status=MessageDelivery.STATUS_PENDING,
+                    )
+                    for recipient_id in recipient_ids
+                ],
+                ignore_conflicts=True,
+            )
+            candidates = MessageDelivery.objects.select_for_update().filter(
+                room_id=room_id,
+                message_id=message_id,
+                sender_id=self.user.id,
+                recipient_id__in=recipient_ids,
+                status=MessageDelivery.STATUS_PENDING,
+                push_sent_at__isnull=True,
+            ).filter(
+                Q(routed_at__isnull=True)
+                | ~Q(routed_via=MessageDelivery.ROUTE_PUSH)
+                | Q(routed_at__lt=stale_before)
+            )
+            reserved_recipient_ids = list(candidates.values_list("recipient_id", flat=True))
+            if not reserved_recipient_ids:
+                logger.info(
+                    "[Axion] duplicate push suppressed message_id=%s room=%s",
+                    message_id,
+                    room_id,
+                )
+                return False
+            candidates.update(
+                routed_via=MessageDelivery.ROUTE_PUSH,
+                routed_at=now,
+            )
+
         sent = send_message_push(
-            recipient_ids=recipient_ids,
+            recipient_ids=reserved_recipient_ids,
             sender_name=sender_name,
             content=content,
             room_id=room_id,
@@ -2398,6 +2519,23 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             created_at=created_at,
             extra_data=extra_data,
         )
+        delivery_rows = MessageDelivery.objects.filter(
+            room_id=room_id,
+            message_id=message_id,
+            sender_id=self.user.id,
+            recipient_id__in=reserved_recipient_ids,
+            push_sent_at__isnull=True,
+            routed_via=MessageDelivery.ROUTE_PUSH,
+            routed_at=now,
+        )
+        if sent:
+            delivery_rows.update(push_sent_at=timezone.now())
+        else:
+            # Release the reservation for the next reconnect/background sweep.
+            delivery_rows.update(
+                routed_via=MessageDelivery.ROUTE_UNKNOWN,
+                routed_at=None,
+            )
         return sent
 
     @database_sync_to_async
