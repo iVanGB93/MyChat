@@ -1387,7 +1387,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         await self._finish_notification_setup()
         await self._send_presence_snapshot()
 
-    async def _finish_notification_setup(self):
+    async def _finish_notification_setup(self, *, send_auth_ok: bool = False):
         """Complete connection setup once self.user is authenticated."""
         self.group_name = f"notifications_{self.user.id}"
         try:
@@ -1413,6 +1413,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "channel_seen_ts": {self.channel_name: time.time()},
                     "last_seen_ts": time.time(),
                 }
+        # Authentication is already validated and the personal channel group
+        # is ready. Acknowledge now so mobile reconnect UX never waits behind
+        # presence aggregation, room/contact subscription, or pending-delivery
+        # database work on a busy/cold Railway instance.
+        if send_auth_ok:
+            await self.send(text_data=json.dumps({"type": "auth_ok"}))
         try:
             await self._upsert_presence_session(UserPresence.APP_STATE_UNKNOWN)
             payload, changed = await self._sync_notification_presence(touch_when_empty=True)
@@ -1526,8 +1532,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     if self._auth_timeout_task:
                         self._auth_timeout_task.cancel()
                         self._auth_timeout_task = None
-                    await self._finish_notification_setup()
-                    await self.send(text_data=json.dumps({"type": "auth_ok"}))
+                    await self._finish_notification_setup(send_auth_ok=True)
                     await self._send_presence_snapshot()
                 # Ignore all other messages until authenticated
                 return

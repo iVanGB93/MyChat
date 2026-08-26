@@ -462,3 +462,43 @@ class AxionMessageLifecycleTests(TransactionTestCase):
                 await self._disconnect_all(sender_socket, recipient_socket)
 
         async_to_sync(scenario)()
+
+    def test_post_connect_auth_ack_does_not_wait_for_presence_bootstrap(self):
+        async def scenario():
+            bootstrap_release = asyncio.Event()
+
+            async def slow_presence_bootstrap(_consumer, touch_when_empty=False):
+                await bootstrap_release.wait()
+                return ({
+                    "user_id": self.sender.id,
+                    "is_online": False,
+                    "presence": "background",
+                    "last_seen": None,
+                    "expires_in": 70,
+                }, False)
+
+            with patch.object(
+                NotificationConsumer,
+                "_sync_notification_presence",
+                new=slow_presence_bootstrap,
+            ):
+                socket = WebsocketCommunicator(application, "/ws/notifications/")
+                try:
+                    connected, _subprotocol = await socket.connect(timeout=2)
+                    self.assertTrue(connected)
+                    await socket.send_json_to({
+                        "type": "auth",
+                        "token": self._token_for(self.sender),
+                    })
+                    ack = await socket.receive_json_from(timeout=2)
+                    self.assertEqual(ack["type"], "auth_ok")
+                    bootstrap_release.set()
+                    await self._receive_until(
+                        socket,
+                        lambda frame: frame.get("event") == "presence_snapshot",
+                    )
+                finally:
+                    bootstrap_release.set()
+                    await self._disconnect_all(socket)
+
+        async_to_sync(scenario)()
