@@ -586,6 +586,51 @@ class AxionMessageLifecycleTests(TransactionTestCase):
         self.assertFalse(payload["is_online"])
         self.assertEqual(payload["presence"], "background")
 
+    def test_new_axion_socket_supersedes_same_installation_lease(self):
+        """A reconnect must not leave a ghost foreground lease behind."""
+
+        async def connect_installation(installation_id):
+            socket = WebsocketCommunicator(application, "/ws/notifications/")
+            connected, _subprotocol = await socket.connect(timeout=2)
+            self.assertTrue(connected)
+            await socket.send_json_to({
+                "type": "auth",
+                "token": self._token_for(self.sender),
+                "installation_id": installation_id,
+            })
+            await self._receive_until(socket, lambda frame: frame.get("type") == "auth_ok")
+            await self._receive_until(socket, lambda frame: frame.get("event") == "presence_snapshot")
+            return socket
+
+        async def scenario():
+            first = second = None
+            try:
+                first = await connect_installation("test-installation")
+                await first.send_json_to({"type": "app_state", "state": "active"})
+                await first.send_json_to({"type": "ping"})
+                await self._receive_until(first, lambda frame: frame.get("type") == "pong")
+
+                second = await connect_installation("test-installation")
+                await second.send_json_to({"type": "app_state", "state": "background"})
+                await second.send_json_to({"type": "ping"})
+                await self._receive_until(second, lambda frame: frame.get("type") == "pong")
+
+                def one_background_lease():
+                    rows = list(UserPresenceSession.objects.filter(
+                        user=self.sender,
+                        installation_id="test-installation",
+                    ).values_list("app_state", flat=True))
+                    return rows == [UserPresence.APP_STATE_BACKGROUND]
+
+                await self._wait_for_database(one_background_lease)
+                payload, _changed = await database_sync_to_async(aggregate_user_presence)(self.sender.id)
+                self.assertFalse(payload["is_online"])
+                self.assertEqual(payload["presence"], "background")
+            finally:
+                await self._disconnect_all(first, second)
+
+        async_to_sync(scenario)()
+
     def test_presence_update_reaches_an_authorized_room_peer(self):
         self._create_room()
 

@@ -1369,6 +1369,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
         self.user = self.scope["user"]
+        self.installation_id = ""
         self._awaiting_auth = False
         self._accepted = False
         self._auth_timeout_task = None
@@ -1420,7 +1421,32 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         if send_auth_ok:
             await self.send(text_data=json.dumps({"type": "auth_ok"}))
         try:
-            await self._upsert_presence_session(UserPresence.APP_STATE_UNKNOWN)
+            superseded_channels = await self._upsert_presence_session(UserPresence.APP_STATE_UNKNOWN)
+            if superseded_channels:
+                with _connected_lock:
+                    entry = _connected_notification_users.get(self.user.id)
+                    if entry:
+                        for old_channel in superseded_channels:
+                            entry["channels"].discard(old_channel)
+                            entry.get("channel_states", {}).pop(old_channel, None)
+                            entry.get("channel_seen_ts", {}).pop(old_channel, None)
+                for old_channel in superseded_channels:
+                    try:
+                        await self.channel_layer.send(
+                            old_channel,
+                            {"type": "supersede_connection"},
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[NotificationConsumer] stale installation channel already gone channel=%s",
+                            old_channel,
+                        )
+                logger.info(
+                    "[WS] superseded %d stale Axion session(s) user=%s installation=…%s",
+                    len(superseded_channels),
+                    self.user.username,
+                    self.installation_id[-8:],
+                )
             payload, changed = await self._sync_notification_presence(touch_when_empty=True)
             await self._subscribe_presence_groups()
             if changed:
@@ -1508,6 +1534,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         except Exception:
             logger.exception("[NotificationConsumer] disconnect handler failed code=%s", close_code)
 
+    async def supersede_connection(self, _event):
+        """Close a lease replaced by a newer Axion socket from the same install."""
+        await self.close(code=4002)
+
     async def receive(self, text_data):
         try:
             data = json.loads(text_data)
@@ -1528,6 +1558,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         await self.close(code=4001)
                         return
                     self.user = user
+                    self.installation_id = str(data.get("installation_id") or "")[:64]
                     self._awaiting_auth = False
                     if self._auth_timeout_task:
                         self._auth_timeout_task.cancel()
@@ -2137,14 +2168,24 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             user=self.user,
             last_seen__lt=now - timedelta(seconds=PRESENCE_STALE_SECONDS),
         ).delete()
+        superseded_channels: list[str] = []
+        if self.installation_id:
+            prior = UserPresenceSession.objects.filter(
+                user=self.user,
+                installation_id=self.installation_id,
+            ).exclude(connection_id=self.channel_name)
+            superseded_channels = list(prior.values_list("connection_id", flat=True))
+            prior.delete()
         UserPresenceSession.objects.update_or_create(
             connection_id=self.channel_name,
             defaults={
                 "user": self.user,
+                "installation_id": self.installation_id,
                 "app_state": app_state,
                 "last_seen": now,
             },
         )
+        return superseded_channels
 
     @database_sync_to_async
     def _touch_presence_session(self):
@@ -2156,6 +2197,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             UserPresenceSession.objects.create(
                 connection_id=self.channel_name,
                 user=self.user,
+                installation_id=self.installation_id,
                 app_state=UserPresence.APP_STATE_UNKNOWN,
                 last_seen=timezone.now(),
             )

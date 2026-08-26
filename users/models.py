@@ -270,6 +270,10 @@ class UserPresenceSession(models.Model):
         User, on_delete=models.CASCADE, related_name="presence_sessions"
     )
     connection_id = models.CharField(max_length=255, unique=True)
+    # Stable per-install identity supplied by the client. A reconnect from the
+    # same app installation supersedes its old lease immediately instead of
+    # leaving a ghost foreground session alive until the heartbeat TTL.
+    installation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
     app_state = models.CharField(
         max_length=16,
         choices=UserPresence.APP_STATE_CHOICES,
