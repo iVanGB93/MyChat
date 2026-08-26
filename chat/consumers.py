@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -17,7 +17,13 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from .models import ChatRoom, PendingDelivery, MessageDelivery, OfflineEmailNudge
 from .push import send_message_push
-from users.models import UserDevice, UserPresence
+from users.models import BlockedUser, Contact, UserDevice, UserPresence, UserPresenceSession
+from users.presence import (
+    aggregate_user_presence,
+    build_presence_snapshot,
+    effective_presence_is_online,
+    notification_presence_is_stale,
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -31,7 +37,7 @@ _connected_lock = threading.Lock()
 #     "username": str,
 #     "connected_at": str,
 #     "channels": set[str],
-#     "app_state": str,
+#     "channel_states": {channel_name: app_state},
 #     "last_seen_ts": float,
 #   }
 # }
@@ -47,6 +53,7 @@ _decision_audit: deque[dict] = deque(maxlen=500)
 WS_AUTH_TIMEOUT_SECONDS = 35.0
 MESSAGE_ACK_TIMEOUT_SECONDS = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
 PRESENCE_STALE_SECONDS = int(getattr(settings, "PRESENCE_STALE_SECONDS", 70))
+PRESENCE_SNAPSHOT_INTERVAL_SECONDS = 50.0
 OFFLINE_EMAIL_COOLDOWN_HOURS = int(getattr(settings, "OFFLINE_EMAIL_COOLDOWN_HOURS", 24))
 
 
@@ -101,7 +108,14 @@ def _get_notification_socket_snapshot(user_id: int) -> tuple[int, str]:
         entry = _connected_notification_users.get(user_id)
         if not entry:
             return 0, UserPresence.APP_STATE_UNKNOWN
-        return len(entry["channels"]), entry.get("app_state", UserPresence.APP_STATE_UNKNOWN)
+        states = list(entry.get("channel_states", {}).values())
+        if UserPresence.APP_STATE_ACTIVE in states:
+            app_state = UserPresence.APP_STATE_ACTIVE
+        elif states:
+            app_state = UserPresence.APP_STATE_BACKGROUND
+        else:
+            app_state = UserPresence.APP_STATE_UNKNOWN
+        return len(entry["channels"]), app_state
 
 
 def _get_chat_socket_snapshot(user_id: int) -> tuple[int, str]:
@@ -115,11 +129,13 @@ def _is_entry_fresh(entry: dict) -> bool:
     return last_seen_ts > 0.0 and (time.time() - last_seen_ts) <= PRESENCE_STALE_SECONDS
 
 
-def _touch_notification_presence(user_id: int) -> None:
+def _touch_notification_presence(user_id: int, channel_name: str | None = None) -> None:
     with _connected_lock:
         entry = _connected_notification_users.get(user_id)
         if entry:
             entry["last_seen_ts"] = time.time()
+            if channel_name and channel_name in entry.get("channel_states", {}):
+                entry.setdefault("channel_seen_ts", {})[channel_name] = time.time()
 
 
 def get_user_presence_state(user_id: int) -> str:
@@ -129,11 +145,11 @@ def get_user_presence_state(user_id: int) -> str:
     except UserPresence.DoesNotExist:
         return "disconnected"
 
-    if not presence.notification_socket_connected and not presence.chat_socket_connected:
+    if not presence.notification_socket_connected:
         return "disconnected"
-    if presence.is_stale(PRESENCE_STALE_SECONDS):
+    if notification_presence_is_stale(presence):
         return "stale"
-    if presence.chat_socket_connected or presence.app_state == UserPresence.APP_STATE_ACTIVE:
+    if effective_presence_is_online(presence):
         return "active"
     return "background"
 
@@ -180,12 +196,12 @@ def get_user_routing_state(user_id: int) -> dict:
             "is_stale": True,
         }
 
-    is_stale = presence.is_stale(PRESENCE_STALE_SECONDS)
-    if not presence.notification_socket_connected and not presence.chat_socket_connected:
+    is_stale = notification_presence_is_stale(presence)
+    if not presence.notification_socket_connected:
         presence_state = "disconnected"
     elif is_stale:
         presence_state = "stale"
-    elif presence.chat_socket_connected or presence.app_state == UserPresence.APP_STATE_ACTIVE:
+    elif effective_presence_is_online(presence):
         presence_state = "active"
     else:
         presence_state = "background"
@@ -200,7 +216,7 @@ def get_user_routing_state(user_id: int) -> dict:
         "active_room_id": presence.active_room_id,
         "push_available": push_available,
         "call_push_available": call_push_available,
-        "is_online": presence.is_online,
+        "is_online": effective_presence_is_online(presence),
         "is_stale": is_stale,
     }
 
@@ -283,23 +299,31 @@ def get_recent_notification_decisions(user_id: int | None = None, limit: int = 5
 def get_connected_notification_users() -> list[dict]:
     """Return list of users connected to the notification WebSocket."""
     with _connected_lock:
-        return [
-            {
+        rows = []
+        for uid, info in _connected_notification_users.items():
+            states = list(info.get("channel_states", {}).values())
+            aggregate_state = (
+                UserPresence.APP_STATE_ACTIVE
+                if UserPresence.APP_STATE_ACTIVE in states
+                else UserPresence.APP_STATE_BACKGROUND
+                if states
+                else UserPresence.APP_STATE_UNKNOWN
+            )
+            rows.append({
                 "user_id": uid,
                 "username": info["username"],
                 "connected_at": info["connected_at"],
                 "connections": len(info["channels"]),
-                "app_state": info.get("app_state", "unknown"),
+                "app_state": aggregate_state,
                 "presence": (
                     "active"
-                    if info.get("app_state") == "active" and _is_entry_fresh(info)
+                    if aggregate_state == UserPresence.APP_STATE_ACTIVE and _is_entry_fresh(info)
                     else "background"
                     if _is_entry_fresh(info)
                     else "stale"
                 ),
-            }
-            for uid, info in _connected_notification_users.items()
-        ]
+            })
+        return rows
 
 
 def get_connected_chat_rooms() -> dict[str, int]:
@@ -1348,6 +1372,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         self._awaiting_auth = False
         self._accepted = False
         self._auth_timeout_task = None
+        self.presence_group_names = set()
+        self._last_presence_snapshot_ts = 0.0
 
         if self.user.is_anonymous:
             # Accept first, then wait for a post-connect {type: 'auth'} message
@@ -1359,6 +1385,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
         # Already authenticated via query-string token — complete setup now
         await self._finish_notification_setup()
+        await self._send_presence_snapshot()
 
     async def _finish_notification_setup(self):
         """Complete connection setup once self.user is authenticated."""
@@ -1374,18 +1401,24 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             entry = _connected_notification_users.get(self.user.id)
             if entry:
                 entry["channels"].add(self.channel_name)
+                entry.setdefault("channel_states", {})[self.channel_name] = UserPresence.APP_STATE_UNKNOWN
+                entry.setdefault("channel_seen_ts", {})[self.channel_name] = time.time()
                 entry["last_seen_ts"] = time.time()
             else:
                 _connected_notification_users[self.user.id] = {
                     "username": self.user.username,
                     "connected_at": datetime.utcnow().isoformat(),
                     "channels": {self.channel_name},
-                    "app_state": "active",
+                    "channel_states": {self.channel_name: UserPresence.APP_STATE_UNKNOWN},
+                    "channel_seen_ts": {self.channel_name: time.time()},
                     "last_seen_ts": time.time(),
                 }
         try:
-            notification_socket_count, app_state = _get_notification_socket_snapshot(self.user.id)
-            await self._sync_notification_presence(notification_socket_count, app_state=app_state, touch=True)
+            await self._upsert_presence_session(UserPresence.APP_STATE_UNKNOWN)
+            payload, changed = await self._sync_notification_presence(touch_when_empty=True)
+            await self._subscribe_presence_groups()
+            if changed:
+                await self._broadcast_presence(payload)
         except Exception:
             logger.exception("[NotificationConsumer] _sync_notification_presence failed user=%s", self.user.id)
 
@@ -1440,19 +1473,28 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     )
                 except Exception:
                     logger.exception("[NotificationConsumer] group_discard failed")
+            for presence_group in getattr(self, "presence_group_names", set()):
+                try:
+                    await self.channel_layer.group_discard(presence_group, self.channel_name)
+                except Exception:
+                    logger.exception("[NotificationConsumer] presence group_discard failed group=%s", presence_group)
             # Untrack notification user
             if hasattr(self, "user") and not self.user.is_anonymous:
                 with _connected_lock:
                     entry = _connected_notification_users.get(self.user.id)
                     if entry:
                         entry["channels"].discard(self.channel_name)
+                        entry.get("channel_states", {}).pop(self.channel_name, None)
+                        entry.get("channel_seen_ts", {}).pop(self.channel_name, None)
                         if not entry["channels"]:
                             del _connected_notification_users[self.user.id]
                 # Mark user offline in DB when last WS disconnects
                 still_connected = is_user_ws_connected(self.user.id)
                 try:
-                    notification_socket_count, _app_state = _get_notification_socket_snapshot(self.user.id)
-                    await self._sync_notification_presence(notification_socket_count, touch=True)
+                    await self._delete_presence_session()
+                    payload, changed = await self._sync_notification_presence(touch_when_empty=True)
+                    if changed:
+                        await self._broadcast_presence(payload)
                 except Exception:
                     logger.exception("[NotificationConsumer] _sync_notification_presence(disconnect) failed")
                 logger.info("[WS] Notification disconnected: user=%s code=%s (still_connected=%s)",
@@ -1486,34 +1528,56 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         self._auth_timeout_task = None
                     await self._finish_notification_setup()
                     await self.send(text_data=json.dumps({"type": "auth_ok"}))
+                    await self._send_presence_snapshot()
                 # Ignore all other messages until authenticated
                 return
 
             # ---- Respond to keep-alive pings ----
             if msg_type == "ping":
-                _touch_notification_presence(self.user.id)
-                notification_socket_count, _app_state = _get_notification_socket_snapshot(self.user.id)
-                await self._sync_notification_presence(notification_socket_count, touch=True)
+                _touch_notification_presence(self.user.id, self.channel_name)
+                await self._touch_presence_session()
+                payload, changed = await self._sync_notification_presence()
+                if changed:
+                    await self._broadcast_presence(payload)
+                # Refresh all visible peers in one compact snapshot instead of
+                # broadcasting one heartbeat per user/contact edge.
+                if time.monotonic() - self._last_presence_snapshot_ts >= PRESENCE_SNAPSHOT_INTERVAL_SECONDS:
+                    await self._send_presence_snapshot()
                 await self.send(text_data=json.dumps({"type": "pong"}))
                 return
 
             # ---- App state change (active / background) ----
             if msg_type == "app_state":
-                state = data.get("state", "active")  # "active" or "background"
+                state = data.get("state", UserPresence.APP_STATE_BACKGROUND)
+                if state not in {UserPresence.APP_STATE_ACTIVE, UserPresence.APP_STATE_BACKGROUND}:
+                    state = UserPresence.APP_STATE_BACKGROUND
                 with _connected_lock:
                     entry = _connected_notification_users.get(self.user.id)
                     if entry:
-                        entry["app_state"] = state
+                        entry.setdefault("channel_states", {})[self.channel_name] = state
+                        entry.setdefault("channel_seen_ts", {})[self.channel_name] = time.time()
                         entry["last_seen_ts"] = time.time()
-                notification_socket_count, _app_state = _get_notification_socket_snapshot(self.user.id)
-                await self._sync_notification_presence(notification_socket_count, app_state=state, touch=True)
-                is_online = state == "active"
+                await self._upsert_presence_session(state)
+                payload, changed = await self._sync_notification_presence()
+                if changed:
+                    await self._broadcast_presence(payload)
+                is_online = payload["is_online"]
                 logger.info("[WS] app_state=%s user=%s → is_online=%s",
                             state, self.user.username, is_online)
                 return
 
+            # A room/contact refresh can expose new people after this Axion
+            # socket authenticated.  Subscribe only to IDs the server confirms
+            # are still visible to the current user.
+            if msg_type == "presence_subscribe":
+                requested = data.get("user_ids") or []
+                requested_ids = {int(value) for value in requested if str(value).isdigit()}
+                await self._subscribe_presence_groups(requested_ids)
+                await self._send_presence_snapshot(requested_ids)
+                return
+
             # Any valid authenticated frame means this session is alive.
-            _touch_notification_presence(self.user.id)
+            _touch_notification_presence(self.user.id, self.channel_name)
 
             # ---- Axion: shared chat-message relay ----
             # Chat rooms no longer create their own WebSocket. The single
@@ -1902,6 +1966,50 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             logger.exception("[NotificationConsumer.notify] failed user=%s",
                              getattr(self.user, "id", None))
 
+    async def presence_changed(self, event):
+        """Forward a targeted presence lease/update to this watcher."""
+        try:
+            await self.send(text_data=json.dumps(event["payload"]))
+        except Exception:
+            logger.exception("[NotificationConsumer.presence_changed] failed user=%s",
+                             getattr(self.user, "id", None))
+
+    async def _broadcast_presence(self, payload: dict) -> None:
+        try:
+            await self.channel_layer.group_send(
+                f"presence_{self.user.id}",
+                {
+                    "type": "presence.changed",
+                    "payload": {"event": "presence_update", **payload},
+                },
+            )
+        except Exception:
+            logger.exception("[Presence] broadcast failed user=%s", self.user.id)
+
+    async def _subscribe_presence_groups(self, requested_ids: set[int] | None = None) -> None:
+        allowed_ids = await self._allowed_presence_target_ids(requested_ids)
+        for user_id in allowed_ids:
+            group_name = f"presence_{user_id}"
+            if group_name in self.presence_group_names:
+                continue
+            try:
+                await self.channel_layer.group_add(group_name, self.channel_name)
+                self.presence_group_names.add(group_name)
+            except Exception:
+                logger.exception("[Presence] group_add failed watcher=%s target=%s", self.user.id, user_id)
+
+    async def _send_presence_snapshot(self, requested_ids: set[int] | None = None) -> None:
+        allowed_ids = await self._allowed_presence_target_ids(requested_ids)
+        snapshot = await self._build_presence_snapshot(allowed_ids)
+        try:
+            await self.send(text_data=json.dumps({
+                "event": "presence_snapshot",
+                "presences": snapshot,
+            }))
+            self._last_presence_snapshot_ts = time.monotonic()
+        except Exception:
+            logger.exception("[Presence] snapshot failed user=%s", self.user.id)
+
     @database_sync_to_async
     def _set_user_online(self, online: bool):
         """Update the is_online flag and last_seen in the database.
@@ -1937,33 +2045,75 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         )
 
     @database_sync_to_async
-    def _sync_notification_presence(self, notification_socket_count: int, app_state: str | None = None, touch: bool = False):
+    def _upsert_presence_session(self, app_state: str):
         now = timezone.now()
-        presence, _ = UserPresence.objects.get_or_create(
+        # Worker/radio crashes cannot run disconnect(). Clean this user's old
+        # leases at the next successful Axion connection so the table remains
+        # bounded without a separate background job.
+        UserPresenceSession.objects.filter(
             user=self.user,
-            defaults={"last_seen": now},
+            last_seen__lt=now - timedelta(seconds=PRESENCE_STALE_SECONDS),
+        ).delete()
+        UserPresenceSession.objects.update_or_create(
+            connection_id=self.channel_name,
+            defaults={
+                "user": self.user,
+                "app_state": app_state,
+                "last_seen": now,
+            },
         )
-        next_app_state = app_state or presence.app_state or UserPresence.APP_STATE_UNKNOWN
-        notification_connected = notification_socket_count > 0
-        is_online = presence.chat_socket_connected or (
-            notification_connected and next_app_state == UserPresence.APP_STATE_ACTIVE
+
+    @database_sync_to_async
+    def _touch_presence_session(self):
+        updated = UserPresenceSession.objects.filter(
+            connection_id=self.channel_name,
+            user=self.user,
+        ).update(last_seen=timezone.now())
+        if not updated:
+            UserPresenceSession.objects.create(
+                connection_id=self.channel_name,
+                user=self.user,
+                app_state=UserPresence.APP_STATE_UNKNOWN,
+                last_seen=timezone.now(),
+            )
+
+    @database_sync_to_async
+    def _delete_presence_session(self):
+        UserPresenceSession.objects.filter(
+            connection_id=self.channel_name,
+            user=self.user,
+        ).delete()
+
+    @database_sync_to_async
+    def _sync_notification_presence(self, touch_when_empty: bool = False):
+        return aggregate_user_presence(self.user.id, touch_when_empty=touch_when_empty)
+
+    @database_sync_to_async
+    def _allowed_presence_target_ids(self, requested_ids: set[int] | None = None) -> set[int]:
+        contact_ids = set(Contact.objects.filter(owner_id=self.user.id).values_list("contact_id", flat=True))
+        contact_ids.update(Contact.objects.filter(contact_id=self.user.id).values_list("owner_id", flat=True))
+        room_ids = ChatRoom.objects.filter(members=self.user).values_list("id", flat=True)
+        room_peer_ids = set(
+            User.objects.filter(chat_rooms__id__in=room_ids)
+            .exclude(id=self.user.id)
+            .values_list("id", flat=True)
+            .distinct()
         )
-        updates = {
-            "notification_socket_count": notification_socket_count,
-            "notification_socket_connected": notification_connected,
-            "is_online": is_online,
-        }
-        if touch:
-            updates["last_notification_seen_at"] = now
-            updates["last_seen"] = now
-        if app_state is not None:
-            updates["app_state"] = app_state
-            updates["last_app_state_change_at"] = now
-        UserPresence.objects.filter(pk=presence.pk).update(**updates)
-        if touch or app_state is not None:
-            User.objects.filter(id=self.user.id).update(is_online=is_online, last_seen=now)
-        else:
-            User.objects.filter(id=self.user.id).update(is_online=is_online)
+        allowed = contact_ids | room_peer_ids
+        blocked_ids = set(
+            BlockedUser.objects.filter(owner_id=self.user.id).values_list("blocked_id", flat=True)
+        )
+        blocked_ids.update(
+            BlockedUser.objects.filter(blocked_id=self.user.id).values_list("owner_id", flat=True)
+        )
+        allowed -= blocked_ids
+        if requested_ids is not None:
+            allowed &= requested_ids
+        return allowed
+
+    @database_sync_to_async
+    def _build_presence_snapshot(self, user_ids: set[int]) -> list[dict]:
+        return build_presence_snapshot(user_ids)
 
     @database_sync_to_async
     def get_user_routing_state(self, user_id: int) -> dict:
@@ -2043,7 +2193,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 presence
                 and presence.notification_socket_connected
                 and presence.app_state == UserPresence.APP_STATE_ACTIVE
-                and not presence.is_stale(PRESENCE_STALE_SECONDS)
+                and not notification_presence_is_stale(presence)
             ):
                 live_recipient_ids.append(recipient_id)
         offline_recipient_ids = [

@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import ChatRoom, GroupMembership
+from users.presence import effective_presence_is_online
 
 User = get_user_model()
 
@@ -36,7 +37,7 @@ class MemberSerializer(serializers.ModelSerializer):
 
     def get_is_online(self, obj: User) -> bool:
         presence = getattr(obj, "presence", None)
-        return bool(getattr(presence, "is_online", False))
+        return effective_presence_is_online(presence)
 
 
 class ChatRoomSerializer(serializers.ModelSerializer):

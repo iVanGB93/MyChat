@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
@@ -6,6 +7,7 @@ from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from django.test import TransactionTestCase
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
 from config.asgi import application
@@ -16,6 +18,9 @@ from .consumers import (
     _connected_notification_users,
 )
 from .models import ChatRoom, MessageDelivery, PendingDelivery
+from .serializers import MemberSerializer
+from users.models import UserPresence, UserPresenceSession
+from users.presence import aggregate_user_presence
 
 
 User = get_user_model()
@@ -66,7 +71,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
         token["tv"] = user.token_version
         return str(token)
 
-    async def _connect(self, user):
+    async def _connect(self, user, *, report_active=True):
         token = self._token_for(user)
         communicator = WebsocketCommunicator(
             application,
@@ -74,6 +79,16 @@ class AxionMessageLifecycleTests(TransactionTestCase):
         )
         connected, _subprotocol = await communicator.connect(timeout=2)
         self.assertTrue(connected)
+        if report_active:
+            # A physical socket starts as ``unknown`` until the app reports its
+            # lifecycle. Tests that model an open app explicitly complete that
+            # handshake before expecting foreground Axion delivery.
+            await communicator.send_json_to({"type": "app_state", "state": "active"})
+            await communicator.send_json_to({"type": "ping"})
+            await self._receive_until(
+                communicator,
+                lambda frame: frame.get("type") == "pong",
+            )
         return communicator
 
     async def _receive_until(self, communicator, predicate, *, attempts=8):
@@ -266,7 +281,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
                     ).exists()
                 )
 
-                recipient_socket = await self._connect(self.recipient)
+                recipient_socket = await self._connect(self.recipient, report_active=False)
                 pending = await self._receive_until(
                     recipient_socket,
                     lambda frame: frame.get("type") == "pending_deliveries",
@@ -383,3 +398,67 @@ class AxionMessageLifecycleTests(TransactionTestCase):
             ).count(),
             1,
         )
+
+    def test_stale_persisted_online_flag_is_not_serialized_as_online(self):
+        presence = self.sender.presence
+        presence.is_online = True
+        presence.notification_socket_connected = True
+        presence.app_state = UserPresence.APP_STATE_ACTIVE
+        presence.last_notification_seen_at = timezone.now() - timedelta(minutes=5)
+        # A legacy/web room socket may still touch the general timestamp; it
+        # must not make a dead Axion session appear online.
+        presence.last_seen = timezone.now()
+        presence.save()
+
+        self.sender.refresh_from_db()
+        self.assertFalse(MemberSerializer(self.sender).data["is_online"])
+
+    def test_presence_aggregates_all_fresh_axion_sessions(self):
+        now = timezone.now()
+        UserPresenceSession.objects.create(
+            user=self.sender,
+            connection_id="active-phone",
+            app_state=UserPresence.APP_STATE_ACTIVE,
+            last_seen=now,
+        )
+        background = UserPresenceSession.objects.create(
+            user=self.sender,
+            connection_id="background-phone",
+            app_state=UserPresence.APP_STATE_BACKGROUND,
+            last_seen=now,
+        )
+
+        payload, _changed = aggregate_user_presence(self.sender.id)
+        self.assertTrue(payload["is_online"])
+        self.assertEqual(payload["presence"], "active")
+
+        UserPresenceSession.objects.filter(connection_id="active-phone").delete()
+        background.refresh_from_db()
+        payload, _changed = aggregate_user_presence(self.sender.id)
+        self.assertFalse(payload["is_online"])
+        self.assertEqual(payload["presence"], "background")
+
+    def test_presence_update_reaches_an_authorized_room_peer(self):
+        self._create_room()
+
+        async def scenario():
+            sender_socket = recipient_socket = None
+            try:
+                recipient_socket = await self._connect(self.recipient)
+                sender_socket = await self._connect(self.sender)
+                await sender_socket.send_json_to({"type": "app_state", "state": "active"})
+
+                update = await self._receive_until(
+                    recipient_socket,
+                    lambda frame: (
+                        frame.get("event") == "presence_update"
+                        and frame.get("user_id") == self.sender.id
+                        and frame.get("presence") == "active"
+                    ),
+                )
+                self.assertTrue(update["is_online"])
+                self.assertGreater(update["expires_in"], 0)
+            finally:
+                await self._disconnect_all(sender_socket, recipient_socket)
+
+        async_to_sync(scenario)()

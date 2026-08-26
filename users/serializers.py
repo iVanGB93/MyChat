@@ -3,6 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from .models import BlockedUser, Contact
+from .presence import effective_presence_is_online
 
 User = get_user_model()
 
@@ -58,7 +59,7 @@ class UserSerializer(serializers.ModelSerializer):
             data["notif_offline_email_enabled"] = profile.notif_offline_email_enabled
 
         if presence is not None:
-            data["is_online"] = presence.is_online
+            data["is_online"] = effective_presence_is_online(presence)
             data["last_seen"] = presence.last_seen.isoformat().replace("+00:00", "Z") if presence.last_seen else None
 
         return data

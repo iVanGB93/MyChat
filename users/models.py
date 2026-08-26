@@ -257,6 +257,40 @@ class UserPresence(models.Model):
         return result
 
 
+class UserPresenceSession(models.Model):
+    """A short-lived lease for one authenticated Axion connection.
+
+    Presence is aggregated across these rows instead of letting the most
+    recently reporting phone overwrite a user-wide app state.  Rows are
+    deliberately safe to leave behind after a worker crash: every reader
+    ignores leases whose ``last_seen`` has passed the presence TTL.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="presence_sessions"
+    )
+    connection_id = models.CharField(max_length=255, unique=True)
+    app_state = models.CharField(
+        max_length=16,
+        choices=UserPresence.APP_STATE_CHOICES,
+        default=UserPresence.APP_STATE_UNKNOWN,
+    )
+    connected_at = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-last_seen"]
+        indexes = [
+            models.Index(fields=["user", "app_state", "last_seen"], name="users_prs_user_state_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"PresenceSession<{self.user.username}:{self.connection_id}>"
+
+    def is_stale(self, stale_after_seconds: int) -> bool:
+        return (timezone.now() - self.last_seen).total_seconds() > stale_after_seconds
+
+
 class UserDevice(models.Model):
     """Per-device endpoint metadata for push delivery and routing."""
 

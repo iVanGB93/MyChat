@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 
-from .models import Contact, UserDevice, UserPresence, UserProfile
+from .models import Contact, UserDevice, UserPresence, UserPresenceSession, UserProfile
 
 User = get_user_model()
 
@@ -56,6 +56,13 @@ class UserPresenceAdmin(admin.ModelAdmin):
         "notification_socket_connected",
         "chat_socket_connected",
     )
+
+
+@admin.register(UserPresenceSession)
+class UserPresenceSessionAdmin(admin.ModelAdmin):
+    list_display = ("user", "connection_id", "app_state", "last_seen", "connected_at")
+    search_fields = ("user__username", "connection_id")
+    list_filter = ("app_state",)
 
 
 @admin.register(UserDevice)

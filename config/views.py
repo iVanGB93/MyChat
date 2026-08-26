@@ -14,6 +14,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
 from users.models import UserDevice, UserPresence
+from users.presence import effective_presence_is_online
 
 User = get_user_model()
 
@@ -117,14 +118,15 @@ def monitor_api(request):
 
     # ── Users ──
     total_users = User.objects.count()
-    online_users = UserPresence.objects.filter(is_online=True).select_related("user")
+    presence_rows = UserPresence.objects.filter(is_online=True).select_related("user")
+    online_users = [presence for presence in presence_rows if effective_presence_is_online(presence)]
     online_list = [
         {
             "id": presence.user_id,
             "username": presence.user.username,
             "last_seen": presence.last_seen.isoformat() if presence.last_seen else None,
         }
-        for presence in online_users.order_by("-last_seen")
+        for presence in sorted(online_users, key=lambda row: row.last_seen or now, reverse=True)
     ]
 
     users_with_push = User.objects.filter(
@@ -231,7 +233,7 @@ def monitor_api(request):
         "server_time": now.isoformat(),
         "users": {
             "total": total_users,
-            "online_db": online_users.count(),
+            "online_db": len(online_users),
             "online_list": online_list,
             "with_push_token": users_with_push,
         },
@@ -344,7 +346,7 @@ def monitor_routing_view(request, user_id: int):
     presence_payload = None
     if presence is not None:
         presence_payload = {
-            "is_online": presence.is_online,
+            "is_online": effective_presence_is_online(presence),
             "app_state": presence.app_state,
             "chat_socket_connected": presence.chat_socket_connected,
             "chat_socket_count": presence.chat_socket_count,
