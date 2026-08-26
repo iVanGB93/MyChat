@@ -144,6 +144,7 @@ def _send_fcm_data(
     title: str | None = None,
     body: str | None = None,
     notification_priority: str = "high",
+    notification_tag: str | None = None,
 ) -> bool:
     """Send a high-priority FCM v1 message to raw FCM device tokens.
 
@@ -194,6 +195,7 @@ def _send_fcm_data(
             channel_id=channel_id,
             default_sound=True,
             priority=("max" if notification_priority == "max" else "high"),
+            tag=notification_tag,
         )
         # iOS (APNs): the same notification block alerts Apple devices once an
         # APNs key is configured in Firebase + an iOS build ships. Harmless to
@@ -592,6 +594,10 @@ def send_call_push(
             title=title,
             body=body,
             notification_priority="max",
+            # Stable tag lets the app atomically replace Google Play
+            # Services' generic reliability-floor alert with its richer
+            # Notifee CallStyle notification for this exact call.
+            notification_tag=f"axonic-call-floor:{call_id}",
         ) or sent
     if tokens:
         sent = _send_expo_push(
