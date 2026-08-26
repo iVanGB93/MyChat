@@ -407,6 +407,13 @@ def send_message_push(
         e for (e, f) in device_rows
         if not f and _is_expo_push_token(e)
     ))
+    logger.info(
+        "[FCM] message targets recipients=%s device_rows=%d fcm=%d expo_fallback=%d",
+        recipient_ids,
+        len(device_rows),
+        len(fcm_tokens),
+        len(tokens),
+    )
     # Notification body. Media messages carry no text content, so show a
     # type-aware placeholder ("📷 Photo" / "🎤 Voice message") instead of a
     # generic "New message".

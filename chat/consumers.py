@@ -47,6 +47,11 @@ _connected_notification_users: dict[int, dict] = {}
 # { room_id: set[user_id] }
 _connected_chat_users: dict[str, set[int]] = {}
 _decision_audit: deque[dict] = deque(maxlen=500)
+# asyncio keeps only weak references to scheduled tasks. Retain Axion's
+# fire-and-forget durability work until completion so FCM/pending-delivery
+# jobs cannot disappear between the sender acknowledgement and their first
+# database thread turn.
+_background_tasks: set[asyncio.Task] = set()
 # Authentication may need to wait for a busy deploy worker/database call after
 # the WebSocket upgrade.  This protects unauthenticated connections without
 # racing legitimate mobile clients on a cold or loaded instance.
@@ -55,6 +60,28 @@ MESSAGE_ACK_TIMEOUT_SECONDS = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS
 PRESENCE_STALE_SECONDS = int(getattr(settings, "PRESENCE_STALE_SECONDS", 70))
 PRESENCE_SNAPSHOT_INTERVAL_SECONDS = 50.0
 OFFLINE_EMAIL_COOLDOWN_HOURS = int(getattr(settings, "OFFLINE_EMAIL_COOLDOWN_HOURS", 24))
+
+
+def _spawn_background(coro, *, label: str) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _finished(done: asyncio.Task) -> None:
+        _background_tasks.discard(done)
+        if done.cancelled():
+            logger.warning("[AxionTask] cancelled label=%s", label)
+            return
+        error = done.exception()
+        if error is not None:
+            logger.error(
+                "[AxionTask] failed label=%s error=%s",
+                label,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    task.add_done_callback(_finished)
+    return task
 
 
 def _send_offline_message_email(recipient_email: str, recipient_name: str, sender_name: str) -> None:
@@ -969,7 +996,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # the recipient. If we do not receive a message_ack in time, trigger
             # push fallback for any still-pending recipients.
             if tracked_delivery_count > 0:
-                asyncio.create_task(
+                _spawn_background(
                     self.push_fallback_after_timeout(
                         message_id=message_id,
                         sender_name=self.user.username,
@@ -983,7 +1010,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                                          "message_type", "created_at",
                                          "correlation_id", "route_reason")
                         },
-                    )
+                    ),
+                    label=f"room-push-fallback:{message_id}",
                 )
 
             # Acknowledge to sender: server received and relayed this message
@@ -1702,6 +1730,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     self.user.id,
                     target_recipient_id or "all",
                 )
+                logger.info(
+                    "[Axion] route plan message_id=%s live=%s offline=%s",
+                    message_id,
+                    plan["live_recipient_ids"],
+                    plan["offline_email_recipient_ids"],
+                )
                 if hydration:
                     # Recovery frames are requested by one peer that just came
                     # online. Never fan them out to other group members and
@@ -1727,17 +1761,17 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 # and delivery state).  It runs outside the acknowledgement
                 # path and gives reconnects a correct delivery fallback if a
                 # live receipt frame is missed.
-                asyncio.create_task(self.record_axion_message_deliveries(
+                _spawn_background(self.record_axion_message_deliveries(
                     room_id, message_id, plan["recipient_ids"],
-                ))
+                ), label=f"delivery-plan:{message_id}")
                 # This metadata is only an offline wake-up hint; never allow a
                 # contended database write (especially for a group) to delay
                 # the sender's durable local-outbox acknowledgement.
                 if plan["offline_email_recipient_ids"]:
-                    asyncio.create_task(self.record_axion_pending_deliveries(
+                    _spawn_background(self.record_axion_pending_deliveries(
                         room_id,
                         plan["offline_email_recipient_ids"],
-                    ))
+                    ), label=f"pending-delivery:{message_id}")
                 # Only live Axion recipients use the internal channel relay.
                 # Background/killed recipients take the FCM path below.
                 for member_id in plan["live_recipient_ids"]:
@@ -1761,7 +1795,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 # state has closed Axion gets a data push in a background task;
                 # this persists the message without delaying the relay/ack.
                 if plan["offline_email_recipient_ids"]:
-                    asyncio.create_task(self.send_axion_message_push(
+                    _spawn_background(self.send_axion_message_push(
                         recipient_ids=plan["offline_email_recipient_ids"],
                         sender_name=self.user.username,
                         content=content,
@@ -1771,12 +1805,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         message_type=message_type,
                         created_at=created_at,
                         extra_data={k: v for k, v in data.items() if k not in reserved},
-                    ))
+                    ), label=f"message-push:{message_id}")
                 if plan["offline_email_recipient_ids"]:
-                    asyncio.create_task(self.queue_offline_email_nudges(
+                    _spawn_background(self.queue_offline_email_nudges(
                         room_id=room_id,
                         recipient_ids=plan["offline_email_recipient_ids"],
-                    ))
+                    ), label=f"email-nudge:{message_id}")
                 return
 
             # ---- Axion: room readiness lets peers flush durable outboxes ----
@@ -2502,6 +2536,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             return False
         from django.db import transaction
 
+        logger.info(
+            "[AxionPush] start message_id=%s recipients=%s",
+            message_id,
+            recipient_ids,
+        )
+
         # Reserve each per-message push before contacting FCM. If the sender
         # reconnects and replays an accepted message, the same durable delivery
         # row prevents another notification. A stale reservation becomes
@@ -2560,6 +2600,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             message_type=message_type,
             created_at=created_at,
             extra_data=extra_data,
+        )
+        logger.info(
+            "[AxionPush] result message_id=%s recipients=%s sent=%s",
+            message_id,
+            reserved_recipient_ids,
+            sent,
         )
         delivery_rows = MessageDelivery.objects.filter(
             room_id=room_id,
