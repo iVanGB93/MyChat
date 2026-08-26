@@ -89,7 +89,7 @@ def upload_media(request):
 
     max_bytes = _max_upload_bytes()
     if f.size and f.size > max_bytes:
-        return Response({"error": "file too large"}, status=413)
+        return Response({"error": "file too large", "max_bytes": max_bytes}, status=413)
 
     # Stream the upload, hashing as we go and bounding the total size.
     hasher = hashlib.sha256()
@@ -99,7 +99,7 @@ def upload_media(request):
     for chunk in f.chunks(STREAM_CHUNK):
         total += len(chunk)
         if total > max_bytes:
-            return Response({"error": "file too large"}, status=413)
+            return Response({"error": "file too large", "max_bytes": max_bytes}, status=413)
         hasher.update(chunk)
         md5_hasher.update(chunk)
         buf.extend(chunk)
@@ -115,10 +115,36 @@ def upload_media(request):
 
     mime = (request.data.get("mime") or f.content_type or "application/octet-stream")[:80]
 
+    message_id = (request.data.get("message_id") or "")[:64]
+    # A mobile upload can finish on the server while its HTTP response is lost.
+    # Reusing the first blob for the same client message makes retries idempotent
+    # instead of filling Postgres with duplicate bytes.
+    existing = None
+    if message_id:
+        existing = MediaBlob.objects.filter(
+            room=room,
+            owner=request.user,
+            message_id=message_id,
+        ).order_by("created_at").first()
+    if existing is not None:
+        if existing.sha256 != digest or existing.media_type != media_type:
+            return Response({"error": "message_id already belongs to another file"}, status=409)
+        return Response(
+            {
+                "media_id": str(existing.id),
+                "sha256": existing.sha256,
+                "md5": existing.md5,
+                "size_bytes": existing.size_bytes,
+                "mime": existing.mime,
+                "reused": True,
+            },
+            status=200,
+        )
+
     blob = MediaBlob.objects.create(
         room=room,
         owner=request.user,
-        message_id=(request.data.get("message_id") or "")[:64],
+        message_id=message_id,
         media_type=media_type,
         mime=mime,
         size_bytes=total,

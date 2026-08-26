@@ -6,8 +6,10 @@ from asgiref.sync import async_to_sync
 from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
-from django.test import TransactionTestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
 from config.asgi import application
@@ -17,13 +19,62 @@ from .consumers import (
     _connected_lock,
     _connected_notification_users,
 )
-from .models import ChatRoom, MessageDelivery, PendingDelivery
+from .models import ChatRoom, MediaBlob, MessageDelivery, PendingDelivery
 from .serializers import MemberSerializer
 from users.models import UserPresence, UserPresenceSession
 from users.presence import aggregate_user_presence
 
 
 User = get_user_model()
+
+
+class MediaUploadReliabilityTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.sender = User.objects.create_user(
+            username="media-sender",
+            email="media-sender@example.com",
+            password="test-password",
+        )
+        recipient = User.objects.create_user(
+            username="media-recipient",
+            email="media-recipient@example.com",
+            password="test-password",
+        )
+        self.room = ChatRoom.objects.create(room_type=ChatRoom.DIRECT)
+        self.room.members.set([self.sender, recipient])
+        self.client = APIClient()
+        self.client.force_authenticate(self.sender)
+
+    def _upload(self, content=b"document", *, message_id="media-message-1"):
+        return self.client.post(
+            "/api/chat/media/",
+            {
+                "file": SimpleUploadedFile("report.pdf", content, content_type="application/pdf"),
+                "room_id": str(self.room.id),
+                "media_type": "document",
+                "mime": "application/pdf",
+                "message_id": message_id,
+            },
+            format="multipart",
+        )
+
+    @override_settings(MEDIA_MAX_UPLOAD_BYTES=4)
+    def test_oversized_upload_reports_authoritative_limit(self):
+        response = self._upload(b"12345")
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.data["max_bytes"], 4)
+        self.assertEqual(MediaBlob.objects.count(), 0)
+
+    def test_retry_reuses_blob_for_same_message_id(self):
+        first = self._upload()
+        second = self._upload()
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data["reused"])
+        self.assertEqual(second.data["media_id"], first.data["media_id"])
+        self.assertEqual(MediaBlob.objects.count(), 1)
 
 
 class AxionMessageLifecycleTests(TransactionTestCase):
