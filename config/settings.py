@@ -26,7 +26,7 @@ ALLOWED_HOSTS = ['*']
 #   optional update. MIN_SUPPORTED_VERSION: clients below it are FORCED to update
 #   (e.g. after a breaking WS/protocol change). Bump these on release; overridable
 #   via env on Railway without a code deploy.
-APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "1.0.15")
+APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "1.0.25")
 APP_MIN_SUPPORTED_VERSION = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0")
 APP_STORE_URL_ANDROID = os.getenv(
     "APP_STORE_URL_ANDROID",

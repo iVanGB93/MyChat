@@ -13,6 +13,7 @@ from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
+from django.views.decorators.cache import never_cache
 from users.models import UserDevice, UserPresence
 from users.presence import effective_presence_is_online
 
@@ -31,6 +32,7 @@ def landing_view(request):
     )
 
 
+@never_cache
 def app_version_view(request):
     """Public endpoint the mobile app polls on launch to decide whether to
     suggest (or force) an update. No auth — must work before/around login.
@@ -38,13 +40,13 @@ def app_version_view(request):
     Response:
       latest          — newest published version
       min_supported   — clients below this are forced to update
-      store_url        — platform store link (falls back to Android)
+      store_url        — platform-specific store link
       store_url_android / store_url_ios
     """
     platform = (request.GET.get("platform") or "").lower()
     android = settings.APP_STORE_URL_ANDROID
     ios = settings.APP_STORE_URL_IOS
-    store_url = ios if platform == "ios" and ios else android
+    store_url = ios if platform == "ios" else android
     return JsonResponse({
         "latest": settings.APP_LATEST_VERSION,
         "min_supported": settings.APP_MIN_SUPPORTED_VERSION,
