@@ -148,12 +148,10 @@ def _send_fcm_data(
 ) -> bool:
     """Send a high-priority FCM v1 message to raw FCM device tokens.
 
-    HYBRID delivery: when ``title``/``body`` are provided we attach a
-    ``notification`` block so Google Play Services renders the alert itself
-    even when the app is fully killed (a data-only message cannot wake a killed
-    app reliably). The ``data`` payload still rides along so the app can
-    save-to-DB / ack / render a rich MessagingStyle notification whenever it is
-    actually running (foreground, or kept alive by the foreground service).
+    Data-only delivery is used by Axonic's Android message/call paths so the
+    registered headless Firebase handler can render the same actionable Notifee
+    UI in foreground, background, and killed-process states. Callers may still
+    provide ``title``/``body`` for diagnostic or legacy OS-rendered messages.
     All data values must be strings. Fire-and-forget: never raises.
 
     NOTE: FCM v1 REJECTS the entire message with INVALID_ARGUMENT if the data
@@ -439,9 +437,8 @@ def send_message_push(
         "routeReason": route_reason,
         "correlation_id": correlation_id,
         "route_reason": route_reason,
-        # This push carries an OS-rendered notification block. If Android also
-        # wakes the JS background handler, ingress must persist/ack the message
-        # without drawing a second local notification.
+        # A push has been queued, so an Axion copy must not render a second
+        # notification. The FCM headless handler owns the actionable card.
         "pushFloor": "true",
         "push_floor": "true",
     }
@@ -498,20 +495,23 @@ def send_message_push(
                 # Skip oversized values to keep the payload under Expo's limit.
                 continue
             data[k] = sv
-    # HYBRID FCM push: Google Play Services renders the notification even when
-    # Android has frozen or killed the app, while the data payload still lets
-    # the background handler persist and acknowledge the message whenever the
-    # process is allowed to run. This reliability floor is more important than
-    # requiring JavaScript to wake in order to draw a custom MessagingStyle
-    # notification. Expo remains the fallback for devices without raw FCM.
+    # Raw FCM is deliberately data-only. A `notification` block makes Android
+    # bypass the background handler and draw a generic card, which removes
+    # Axonic's Reply / Mark-as-read actions and conversation styling. The
+    # high-priority headless handler persists, acknowledges, and renders the
+    # actionable Notifee notification. Expo remains a legacy-device fallback.
     sent = False
     if fcm_tokens:
+        fcm_data = dict(data)
+        # These remain data fields (not an FCM `notification` block). They give
+        # the headless renderer a useful media/document fallback body while the
+        # canonical message fields continue to drive local persistence.
+        fcm_data["title"] = sender_name
+        fcm_data["body"] = display_body
         sent = _send_fcm_data(
             fcm_tokens=fcm_tokens,
-            data=dict(data),
+            data=fcm_data,
             channel_id="messages",
-            title=sender_name,
-            body=display_body,
         ) or sent
     if tokens:
         sent = _send_expo_push(
@@ -536,11 +536,10 @@ def send_call_push(
 ) -> bool:
     """Send a push notification for an incoming call.
 
-    HYBRID delivery, same model as messages: devices with a raw FCM token get a
-    high-priority FCM message carrying BOTH a `notification` block (so the OS
-    rings/alerts even when the app is killed) and the call `data` (so the app
-    can show the full incoming-call UI when it is alive or when tapped). Expo is
-    the fallback for devices without an FCM token, so no device is double-pushed.
+    Devices with a raw FCM token get a high-priority data message so Axonic's
+    headless handler can render the full CallStyle notification with Accept and
+    Decline actions. Expo is the fallback for devices without an FCM token, so
+    no registered installation is double-pushed.
     """
     device_rows = list(
         UserDevice.objects.filter(
@@ -579,25 +578,13 @@ def send_call_push(
         fcm_data = dict(data)
         fcm_data["title"] = title
         fcm_data["body"] = body
-        # HYBRID reliability floor. Android may freeze a cached app process and
-        # decline to wake JavaScript for a data-only message, even at high
-        # priority. The notification block lets Google Play Services ring and
-        # render the incoming call without starting Axonic; the attached data
-        # still opens the correct call and lets the app verify that it remains
-        # active. When JS is allowed to run, the background handler upgrades
-        # this to the richer Notifee CallStyle presentation.
+        # Data-only is required here: attaching an FCM notification block makes
+        # Android draw a generic alert and bypasses Axonic's CallStyle renderer.
         sent = _send_fcm_data(
             fcm_tokens=fcm_tokens,
             data=fcm_data,
             channel_id="incoming-calls-v2",
             priority="high",
-            title=title,
-            body=body,
-            notification_priority="max",
-            # Stable tag lets the app atomically replace Google Play
-            # Services' generic reliability-floor alert with its richer
-            # Notifee CallStyle notification for this exact call.
-            notification_tag=f"axonic-call-floor:{call_id}",
         ) or sent
     if tokens:
         sent = _send_expo_push(

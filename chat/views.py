@@ -590,7 +590,7 @@ def send_message(request):
         # app decide: relay over every notification WS the user has open AND
         # always queue a push floor when a token exists. A foreground app
         # receives the push silently (onMessage); only backgrounded/killed apps
-        # render the OS banner — so this never double-notifies.
+        # render the actionable banner — so this never double-notifies.
         relayed_via_ws = False
         will_push = bool(routing_state["push_available"])
         if member_channels:
@@ -612,7 +612,7 @@ def send_message(request):
                 "correlation_id": f"msg:{message_id}",
                 "route_reason": "notif_ws",
                 # Tell the app a push floor is also in flight so it can defer the
-                # OS banner to FCM and avoid double-notifying. When False, the
+                # actionable banner to FCM and avoid duplicates. When False, the
                 # app is the ONLY notification surface.
                 "push_floor": will_push,
             }

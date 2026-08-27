@@ -867,10 +867,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 #      has open (instant in-app toast / background save), AND
                 #   2) ALWAYS queue an FCM/Expo push as the guaranteed
                 #      notification floor whenever a push token exists.
-                # The OS only renders the push banner when the app is
-                # backgrounded/killed; a foreground app receives the same push
-                # silently (onMessage), so this never double-notifies. The app
-                # itself decides what to display based on its own true state.
+                # The FCM handler renders the actionable banner only when the
+                # app is backgrounded/killed; a foreground app receives the
+                # same push silently (onMessage), so this never double-notifies.
+                # The app itself decides what to display from its true state.
                 relayed_via_ws = False
                 will_push = bool(routing_state["push_available"])
                 if member_channels:
@@ -895,7 +895,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         "correlation_id": f"msg:{message_id}",
                         "route_reason": "notif_ws",
                         # Tell the app a push floor is also in flight so it can
-                        # defer the OS banner to FCM and avoid double-notifying.
+                        # defer the actionable banner to FCM and avoid duplicates.
                         # When False, the app is the ONLY notification surface.
                         "push_floor": will_push,
                     }
