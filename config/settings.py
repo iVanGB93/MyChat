@@ -273,7 +273,7 @@ CALL_INVITE_RETRY_INTERVAL_SECONDS = int(os.getenv("CALL_INVITE_RETRY_INTERVAL_S
 # backing store can be swapped for object storage later. Retention: delete a
 # blob MEDIA_DELETE_GRACE_HOURS after every recipient confirms a verified
 # download, or after MEDIA_HARD_TTL_DAYS as a fallback for never-downloaded blobs.
-MEDIA_MAX_UPLOAD_BYTES = int(os.getenv("MEDIA_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+MEDIA_MAX_UPLOAD_BYTES = int(os.getenv("MEDIA_MAX_UPLOAD_BYTES", str(250 * 1024 * 1024)))
 MEDIA_DELETE_GRACE_HOURS = int(os.getenv("MEDIA_DELETE_GRACE_HOURS", "48"))
 MEDIA_HARD_TTL_DAYS = int(os.getenv("MEDIA_HARD_TTL_DAYS", "30"))
 MEDIA_CLEANUP_INTERVAL_SECONDS = int(os.getenv("MEDIA_CLEANUP_INTERVAL_SECONDS", "3600"))

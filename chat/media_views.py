@@ -33,7 +33,7 @@ ALLOWED_MEDIA_TYPES = {"image", "voice", "video", "document"}
 
 
 def _max_upload_bytes() -> int:
-    return int(getattr(settings, "MEDIA_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+    return int(getattr(settings, "MEDIA_MAX_UPLOAD_BYTES", 250 * 1024 * 1024))
 
 
 def _grace_hours() -> int:
