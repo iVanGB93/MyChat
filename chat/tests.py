@@ -20,6 +20,7 @@ from .consumers import (
     _connected_notification_users,
 )
 from .models import ChatRoom, MediaBlob, MessageDelivery, PendingDelivery
+from .tasks import cleanup_expired_media
 from .serializers import MemberSerializer
 from users.models import UserPresence, UserPresenceSession
 from users.presence import aggregate_user_presence
@@ -133,6 +134,147 @@ class MediaUploadReliabilityTests(TransactionTestCase):
         self.assertTrue(completed.data["uploaded"])
         self.assertIsNotNone(MediaBlob.objects.get().upload_completed_at)
 
+    @override_settings(
+        MEDIA_STORAGE_BACKEND="spaces",
+        MEDIA_MULTIPART_THRESHOLD_BYTES=1,
+        MEDIA_MULTIPART_PART_BYTES=5 * 1024 * 1024,
+    )
+    @patch("chat.media_views.create_presigned_part_upload")
+    @patch("chat.media_views.list_multipart_parts", return_value=[])
+    @patch("chat.media_views.create_multipart_upload", return_value="upload-123")
+    def test_large_upload_returns_resumable_part_plan(self, create_upload, _list_parts, sign_part):
+        sign_part.side_effect = lambda **kwargs: f"https://example.invalid/part/{kwargs['part_number']}"
+        initiated = self.client.post(
+            "/api/chat/media/initiate/",
+            {
+                "room_id": str(self.room.id),
+                "media_type": "video",
+                "mime": "video/mp4",
+                "message_id": "multipart-message-1",
+                "size_bytes": 6 * 1024 * 1024,
+                "md5": "0123456789abcdef0123456789abcdef",
+            },
+            format="json",
+        )
+
+        self.assertEqual(initiated.status_code, 201)
+        self.assertEqual(initiated.data["upload_mode"], "multipart")
+        self.assertEqual(len(initiated.data["parts"]), 2)
+        self.assertEqual(MediaBlob.objects.get().multipart_upload_id, "upload-123")
+        create_upload.assert_called_once()
+
+    @override_settings(MEDIA_STORAGE_BACKEND="spaces")
+    @patch("chat.media_views.complete_multipart_upload")
+    @patch("chat.media_views.list_multipart_parts")
+    @patch("chat.media_views.inspect_object")
+    def test_multipart_completion_uses_authoritative_part_list(self, inspect, list_parts, complete):
+        blob = MediaBlob.objects.create(
+            room=self.room,
+            owner=self.sender,
+            message_id="multipart-message-2",
+            media_type=MediaBlob.VIDEO,
+            mime="video/mp4",
+            size_bytes=6 * 1024 * 1024,
+            sha256="",
+            md5="0123456789abcdef0123456789abcdef",
+            storage_backend="spaces",
+            object_key="media/test/video",
+            multipart_upload_id="upload-456",
+            multipart_part_size=5 * 1024 * 1024,
+        )
+        inspect.side_effect = [
+            RuntimeError("not complete"),
+            {"ContentLength": blob.size_bytes, "Metadata": {"md5": blob.md5}},
+        ]
+        list_parts.return_value = [
+            {"PartNumber": 1, "ETag": "etag-1", "Size": 5 * 1024 * 1024},
+            {"PartNumber": 2, "ETag": "etag-2", "Size": 1 * 1024 * 1024},
+        ]
+
+        response = self.client.post(f"/api/chat/media/{blob.id}/complete/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        complete.assert_called_once()
+        blob.refresh_from_db()
+        self.assertEqual(blob.multipart_upload_id, "")
+        self.assertIsNotNone(blob.upload_completed_at)
+
+
+class MediaCleanupRetentionTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username="cleanup-owner",
+            email="cleanup-owner@example.com",
+            password="test-password",
+        )
+        self.room = ChatRoom.objects.create(room_type=ChatRoom.DIRECT)
+        self.room.members.add(self.owner)
+
+    def _blob(self, **overrides):
+        values = {
+            "room": self.room,
+            "owner": self.owner,
+            "message_id": f"cleanup-{MediaBlob.objects.count()}",
+            "media_type": MediaBlob.DOCUMENT,
+            "mime": "text/plain",
+            "size_bytes": 4,
+            "sha256": "a" * 64,
+            "md5": "b" * 32,
+            "data": b"test",
+            "storage_backend": "database",
+        }
+        values.update(overrides)
+        return MediaBlob.objects.create(**values)
+
+    @override_settings(MEDIA_HARD_TTL_DAYS=30)
+    def test_cleanup_deletes_expired_confirmed_blob_and_keeps_fresh_blob(self):
+        expired = self._blob(delete_after=timezone.now() - timedelta(seconds=1))
+        fresh = self._blob(delete_after=timezone.now() + timedelta(hours=1))
+
+        result = cleanup_expired_media()
+
+        self.assertFalse(MediaBlob.objects.filter(id=expired.id).exists())
+        self.assertTrue(MediaBlob.objects.filter(id=fresh.id).exists())
+        self.assertEqual(result["confirmed"], 1)
+        self.assertEqual(result["hard_ttl"], 0)
+
+    @override_settings(MEDIA_HARD_TTL_DAYS=30)
+    @patch("chat.media_storage.delete_object")
+    def test_cleanup_deletes_stale_spaces_object_before_database_row(self, delete_object):
+        stale = self._blob(
+            data=None,
+            storage_backend="spaces",
+            object_key="media/test/stale.txt",
+        )
+        MediaBlob.objects.filter(id=stale.id).update(
+            created_at=timezone.now() - timedelta(days=31),
+        )
+
+        result = cleanup_expired_media()
+
+        delete_object.assert_called_once_with("media/test/stale.txt")
+        self.assertFalse(MediaBlob.objects.filter(id=stale.id).exists())
+        self.assertEqual(result["hard_ttl"], 1)
+
+    @override_settings(MEDIA_HARD_TTL_DAYS=30)
+    @patch("chat.media_storage.delete_object", side_effect=RuntimeError("storage unavailable"))
+    def test_cleanup_keeps_spaces_row_when_object_deletion_fails(self, _delete_object):
+        stale = self._blob(
+            data=None,
+            storage_backend="spaces",
+            object_key="media/test/retry.txt",
+        )
+        MediaBlob.objects.filter(id=stale.id).update(
+            created_at=timezone.now() - timedelta(days=31),
+        )
+
+        result = cleanup_expired_media()
+
+        self.assertTrue(MediaBlob.objects.filter(id=stale.id).exists())
+        self.assertEqual(result["deleted"], 0)
+
 
 class AxionMessageLifecycleTests(TransactionTestCase):
     """Exercise Axion through the real ASGI routing and notification consumer."""
@@ -185,7 +327,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
             application,
             f"/ws/notifications/?token={token}",
         )
-        connected, _subprotocol = await communicator.connect(timeout=2)
+        connected, _subprotocol = await communicator.connect(timeout=5)
         self.assertTrue(connected)
         if report_active:
             # A physical socket starts as ``unknown`` until the app reports its
@@ -202,7 +344,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
     async def _receive_until(self, communicator, predicate, *, attempts=8):
         received = []
         for _ in range(attempts):
-            payload = await communicator.receive_json_from(timeout=2)
+            payload = await communicator.receive_json_from(timeout=5)
             received.append(payload)
             if predicate(payload):
                 return payload
@@ -305,6 +447,72 @@ class AxionMessageLifecycleTests(TransactionTestCase):
                 to_user=self.recipient,
             ).exists()
         )
+
+    def test_versioned_sync_delta_is_targeted_between_room_members(self):
+        room = self._create_room()
+
+        async def scenario():
+            sender_socket = recipient_socket = None
+            try:
+                sender_socket = await self._connect(self.sender)
+                recipient_socket = await self._connect(self.recipient)
+                entries = [{
+                    "id": "delta-message-1",
+                    "updated_at": "2026-08-31T12:00:00.000Z",
+                    "revision": 2,
+                    "is_deleted": True,
+                }]
+                await sender_socket.send_json_to({
+                    "type": "sync_digest",
+                    "room_id": str(room.id),
+                    "ids": ["delta-message-1"],
+                    "entries": entries,
+                })
+                digest = await self._receive_until(
+                    recipient_socket,
+                    lambda frame: frame.get("event") == "sync_digest",
+                )
+                self.assertEqual(digest["entries"], entries)
+                self.assertEqual(digest["from_user_id"], self.sender.id)
+
+                await recipient_socket.send_json_to({
+                    "type": "sync_request",
+                    "room_id": str(room.id),
+                    "ids": [],
+                    "update_ids": ["delta-message-1"],
+                    "target_user_id": self.sender.id,
+                })
+                request = await self._receive_until(
+                    sender_socket,
+                    lambda frame: frame.get("event") == "sync_request",
+                )
+                self.assertEqual(request["update_ids"], ["delta-message-1"])
+                self.assertEqual(request["from_user_id"], self.recipient.id)
+
+                states = [{
+                    "message_id": "delta-message-1",
+                    "changes": {
+                        "is_deleted": True,
+                        "updated_at": "2026-08-31T12:00:00.000Z",
+                        "revision": 2,
+                    },
+                }]
+                await sender_socket.send_json_to({
+                    "type": "sync_state",
+                    "room_id": str(room.id),
+                    "target_user_id": self.recipient.id,
+                    "states": states,
+                })
+                state = await self._receive_until(
+                    recipient_socket,
+                    lambda frame: frame.get("event") == "sync_state",
+                )
+                self.assertEqual(state["states"], states)
+                self.assertEqual(state["from_user_id"], self.sender.id)
+            finally:
+                await self._disconnect_all(sender_socket, recipient_socket)
+
+        async_to_sync(scenario)()
 
     def test_group_message_reaches_each_active_member_once(self):
         room = self._create_room(

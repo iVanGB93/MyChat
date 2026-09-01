@@ -285,6 +285,8 @@ SPACES_ACCESS_KEY = os.getenv("SPACES_ACCESS_KEY", "").strip()
 SPACES_SECRET_KEY = os.getenv("SPACES_SECRET_KEY", "").strip()
 MEDIA_PRESIGNED_UPLOAD_SECONDS = int(os.getenv("MEDIA_PRESIGNED_UPLOAD_SECONDS", "900"))
 MEDIA_PRESIGNED_DOWNLOAD_SECONDS = int(os.getenv("MEDIA_PRESIGNED_DOWNLOAD_SECONDS", "300"))
+MEDIA_MULTIPART_THRESHOLD_BYTES = int(os.getenv("MEDIA_MULTIPART_THRESHOLD_BYTES", str(16 * 1024 * 1024)))
+MEDIA_MULTIPART_PART_BYTES = max(5 * 1024 * 1024, int(os.getenv("MEDIA_MULTIPART_PART_BYTES", str(8 * 1024 * 1024))))
 CELERY_BEAT_SCHEDULE = {
     "sweep-stale-message-deliveries": {
         "task": "chat.tasks.sweep_stale_message_deliveries",

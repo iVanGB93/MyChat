@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -7,6 +8,7 @@ from rest_framework.response import Response
 
 from .models import ChatRoom, GroupMembership, MessageDelivery
 from .serializers import ChatRoomSerializer
+from .relay_service import record_relay_deliveries
 
 User = get_user_model()
 
@@ -37,9 +39,10 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
     serializer_class = ChatRoomSerializer
 
     def get_queryset(self):
-        return ChatRoom.objects.filter(
-            members=self.request.user
-        ).prefetch_related("members", "group_memberships")
+        return ChatRoom.objects.filter(members=self.request.user).prefetch_related(
+            Prefetch("members", queryset=User.objects.select_related("profile", "presence")),
+            Prefetch("group_memberships", queryset=GroupMembership.objects.select_related("user")),
+        )
 
     def perform_create(self, serializer):
         # Direct rooms must be created through /rooms/direct/, which guarantees
@@ -469,7 +472,6 @@ def send_message(request):
         get_user_routing_state,
         record_notification_decision,
     )
-    from .models import PendingDelivery
     from .push import send_message_push
 
     logger = logging.getLogger(__name__)
@@ -540,6 +542,17 @@ def send_message(request):
     in_room_ids = get_connected_chat_user_ids(room_id)
     push_recipients: list[int] = []
 
+    eligible_recipient_ids = [
+        member_id for member_id in member_ids
+        if member_id != request.user.id and member_id not in blockers
+    ]
+    record_relay_deliveries(
+        room_id=room_id,
+        message_id=message_id,
+        sender_id=request.user.id,
+        recipient_ids=eligible_recipient_ids,
+    )
+
     extra_data = {
         k: v for k, v in msg_data.items()
         if k not in ("id", "sender", "sender_id", "content",
@@ -550,19 +563,6 @@ def send_message(request):
     for member_id in member_ids:
         if member_id == request.user.id or member_id in blockers:
             continue
-
-        MessageDelivery.objects.get_or_create(
-            room_id=room_id,
-            message_id=message_id,
-            sender_id=request.user.id,
-            recipient_id=member_id,
-            defaults={"status": MessageDelivery.STATUS_PENDING},
-        )
-        PendingDelivery.objects.get_or_create(
-            room_id=room_id,
-            from_user_id=request.user.id,
-            to_user_id=member_id,
-        )
 
         routing_state = get_user_routing_state(member_id)
         member_channels = get_user_notification_channels(member_id)

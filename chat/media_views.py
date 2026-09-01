@@ -17,6 +17,7 @@ supported by the original multipart endpoint.
 
 import hashlib
 import logging
+import math
 import re
 from datetime import timedelta
 
@@ -30,9 +31,13 @@ from rest_framework.response import Response
 
 from .models import ChatRoom, MediaBlob, MediaDownload
 from .media_storage import (
+    complete_multipart_upload,
+    create_multipart_upload,
     create_presigned_download,
+    create_presigned_part_upload,
     create_presigned_upload,
     inspect_object,
+    list_multipart_parts,
     object_key_for,
     upload_file,
     uses_spaces,
@@ -46,6 +51,20 @@ logger = logging.getLogger(__name__)
 
 def _max_upload_bytes() -> int:
     return int(getattr(settings, "MEDIA_MAX_UPLOAD_BYTES", 250 * 1024 * 1024))
+
+
+def _multipart_threshold_bytes() -> int:
+    return int(getattr(settings, "MEDIA_MULTIPART_THRESHOLD_BYTES", 16 * 1024 * 1024))
+
+
+def _multipart_part_bytes() -> int:
+    return max(5 * 1024 * 1024, int(getattr(settings, "MEDIA_MULTIPART_PART_BYTES", 8 * 1024 * 1024)))
+
+
+def _missing_multipart_upload(error) -> bool:
+    response = getattr(error, "response", None) or {}
+    code = str((response.get("Error") or {}).get("Code", ""))
+    return code in {"NoSuchUpload", "404"}
 
 
 def _grace_hours() -> int:
@@ -88,6 +107,50 @@ def _get_room_for_upload(request):
     if not _is_member(request.user, room):
         return None, Response({"error": "not a room member"}, status=403)
     return room, None
+
+
+def _prepare_multipart(blob):
+    """Return signed URLs only for parts Spaces does not already contain."""
+    if not blob.multipart_part_size:
+        blob.multipart_part_size = _multipart_part_bytes()
+    if not blob.multipart_upload_id:
+        blob.multipart_upload_id = create_multipart_upload(
+            key=blob.object_key, mime=blob.mime, md5=blob.md5
+        )
+        blob.save(update_fields=["multipart_upload_id", "multipart_part_size"])
+
+    try:
+        uploaded = list_multipart_parts(
+            key=blob.object_key, upload_id=blob.multipart_upload_id
+        )
+    except Exception as error:
+        if not _missing_multipart_upload(error):
+            raise
+        # Spaces may expire abandoned multipart sessions. Start a replacement
+        # while preserving the MediaBlob/message idempotency identity.
+        blob.multipart_upload_id = create_multipart_upload(
+            key=blob.object_key, mime=blob.mime, md5=blob.md5
+        )
+        blob.save(update_fields=["multipart_upload_id", "multipart_part_size"])
+        uploaded = []
+
+    uploaded_numbers = {int(part["PartNumber"]) for part in uploaded}
+    part_count = math.ceil(blob.size_bytes / blob.multipart_part_size) if blob.size_bytes else 1
+    parts = []
+    for part_number in range(1, part_count + 1):
+        part = {"part_number": part_number, "uploaded": part_number in uploaded_numbers}
+        if not part["uploaded"]:
+            part["upload_url"] = create_presigned_part_upload(
+                key=blob.object_key,
+                upload_id=blob.multipart_upload_id,
+                part_number=part_number,
+            )
+        parts.append(part)
+    return {
+        "upload_mode": "multipart",
+        "part_size": blob.multipart_part_size,
+        "parts": parts,
+    }
 
 
 @api_view(["POST"])
@@ -155,7 +218,15 @@ def initiate_media_upload(request):
         blob.save(update_fields=["object_key"])
 
     try:
-        signed = create_presigned_upload(key=blob.object_key, mime=blob.mime, md5=blob.md5)
+        if blob.size_bytes >= _multipart_threshold_bytes():
+            upload_plan = _prepare_multipart(blob)
+        else:
+            signed = create_presigned_upload(key=blob.object_key, mime=blob.mime, md5=blob.md5)
+            upload_plan = {
+                "upload_mode": "single",
+                "upload_url": signed["url"],
+                "upload_headers": signed["headers"],
+            }
     except Exception:
         logger.exception("[Media] could not create upload URL media=%s", blob.id)
         return Response({"error": "media storage is temporarily unavailable"}, status=503)
@@ -164,8 +235,7 @@ def initiate_media_upload(request):
         {
             **_media_payload(blob, reused=existing is not None),
             "uploaded": False,
-            "upload_url": signed["url"],
-            "upload_headers": signed["headers"],
+            **upload_plan,
         },
         status=200 if existing is not None else 201,
     )
@@ -184,11 +254,38 @@ def complete_media_upload(request, media_id):
     if blob.upload_completed_at is not None:
         return Response({**_media_payload(blob, reused=True), "uploaded": True})
 
+    remote = None
     try:
         remote = inspect_object(blob.object_key)
     except Exception:
-        logger.exception("[Media] could not verify upload media=%s", blob.id)
-        return Response({"error": "upload not found or storage unavailable"}, status=503)
+        # An in-progress multipart upload is not visible to HEAD until it is
+        # completed. List authoritative parts server-side so clients do not
+        # need to persist or expose S3 ETags.
+        if blob.multipart_upload_id and blob.multipart_part_size:
+            try:
+                parts = sorted(
+                    list_multipart_parts(
+                        key=blob.object_key, upload_id=blob.multipart_upload_id
+                    ),
+                    key=lambda part: int(part["PartNumber"]),
+                )
+                expected_count = math.ceil(blob.size_bytes / blob.multipart_part_size) if blob.size_bytes else 1
+                if [int(part["PartNumber"]) for part in parts] != list(range(1, expected_count + 1)):
+                    return Response({"error": "multipart upload is incomplete"}, status=409)
+                if sum(int(part.get("Size", 0)) for part in parts) != blob.size_bytes:
+                    return Response({"error": "multipart upload size mismatch"}, status=400)
+                complete_multipart_upload(
+                    key=blob.object_key,
+                    upload_id=blob.multipart_upload_id,
+                    parts=parts,
+                )
+                remote = inspect_object(blob.object_key)
+            except Exception:
+                logger.exception("[Media] could not complete multipart upload media=%s", blob.id)
+                return Response({"error": "upload not found or storage unavailable"}, status=503)
+        else:
+            logger.exception("[Media] could not verify upload media=%s", blob.id)
+            return Response({"error": "upload not found or storage unavailable"}, status=503)
 
     remote_size = int(remote.get("ContentLength", -1))
     remote_md5 = str((remote.get("Metadata") or {}).get("md5", "")).lower()
@@ -196,7 +293,8 @@ def complete_media_upload(request, media_id):
         return Response({"error": "uploaded file verification failed"}, status=400)
 
     blob.upload_completed_at = timezone.now()
-    blob.save(update_fields=["upload_completed_at"])
+    blob.multipart_upload_id = ""
+    blob.save(update_fields=["upload_completed_at", "multipart_upload_id"])
     return Response({**_media_payload(blob), "uploaded": True})
 
 

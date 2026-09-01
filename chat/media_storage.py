@@ -48,6 +48,75 @@ def create_presigned_upload(*, key: str, mime: str, md5: str) -> dict:
         "ContentType": mime,
         "Metadata": {"md5": md5},
     }
+
+
+def create_multipart_upload(*, key: str, mime: str, md5: str) -> str:
+    response = _client().create_multipart_upload(
+        Bucket=settings.SPACES_BUCKET,
+        Key=key,
+        ContentType=mime,
+        Metadata={"md5": md5},
+    )
+    return response["UploadId"]
+
+
+def create_presigned_part_upload(*, key: str, upload_id: str, part_number: int) -> str:
+    return _client().generate_presigned_url(
+        "upload_part",
+        Params={
+            "Bucket": settings.SPACES_BUCKET,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        },
+        ExpiresIn=settings.MEDIA_PRESIGNED_UPLOAD_SECONDS,
+        HttpMethod="PUT",
+    )
+
+
+def list_multipart_parts(*, key: str, upload_id: str) -> list[dict]:
+    client = _client()
+    parts = []
+    marker = 0
+    while True:
+        response = client.list_parts(
+            Bucket=settings.SPACES_BUCKET,
+            Key=key,
+            UploadId=upload_id,
+            PartNumberMarker=marker,
+        )
+        parts.extend(response.get("Parts", []))
+        if not response.get("IsTruncated"):
+            return parts
+        marker = int(response.get("NextPartNumberMarker", 0))
+
+
+def complete_multipart_upload(*, key: str, upload_id: str, parts: list[dict]) -> None:
+    _client().complete_multipart_upload(
+        Bucket=settings.SPACES_BUCKET,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={
+            "Parts": [
+                {"PartNumber": int(part["PartNumber"]), "ETag": part["ETag"]}
+                for part in parts
+            ]
+        },
+    )
+
+
+def abort_multipart_upload(*, key: str, upload_id: str) -> None:
+    try:
+        _client().abort_multipart_upload(
+            Bucket=settings.SPACES_BUCKET,
+            Key=key,
+            UploadId=upload_id,
+        )
+    except Exception as error:
+        response = getattr(error, "response", None) or {}
+        code = str((response.get("Error") or {}).get("Code", ""))
+        if code not in {"NoSuchUpload", "404"}:
+            raise
     url = _client().generate_presigned_url(
         "put_object",
         Params=params,

@@ -113,7 +113,7 @@ def cleanup_expired_media() -> dict:
     Clients keep the thumbnail + metadata in their own local message row, so the
     chat history stays intact after the server blob is gone.
     """
-    from .media_storage import delete_object
+    from .media_storage import abort_multipart_upload, delete_object
     from .models import MediaBlob
 
     now = timezone.now()
@@ -125,6 +125,11 @@ def cleanup_expired_media() -> dict:
         for blob in queryset.iterator():
             if blob.storage_backend == "spaces" and blob.object_key:
                 try:
+                    if blob.multipart_upload_id:
+                        abort_multipart_upload(
+                            key=blob.object_key,
+                            upload_id=blob.multipart_upload_id,
+                        )
                     delete_object(blob.object_key)
                 except Exception:
                     logger.exception(

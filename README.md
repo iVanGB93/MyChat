@@ -82,6 +82,21 @@ python manage.py runserver
 celery -A config worker -l info
 ```
 
+### Railway background services
+
+Production requires two services in addition to the web service. Create them
+from the same repository and environment so they share `DATABASE_URL`, Redis,
+and the media-storage variables:
+
+- **Worker** — set its Railway config file to
+  `/deploy/railway-worker.json`.
+- **Beat** — set its Railway config file to `/deploy/railway-beat.json` and run
+  exactly one replica so scheduled jobs are not emitted twice.
+
+The worker executes message-delivery sweeps, call-invite retries, and media
+cleanup. Beat schedules those tasks from `CELERY_BEAT_SCHEDULE`. The web
+service must remain on the root `/railway.json` configuration.
+
 ## API Endpoints
 
 ### Authentication

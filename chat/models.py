@@ -252,6 +252,10 @@ class MediaBlob(models.Model):
     data = models.BinaryField(null=True, blank=True)
     storage_backend = models.CharField(max_length=16, default="database")
     object_key = models.CharField(max_length=512, blank=True, default="")
+    # Durable S3 multipart identity lets a later client retry continue with the
+    # already-uploaded parts instead of restarting a large transfer.
+    multipart_upload_id = models.CharField(max_length=512, blank=True, default="")
+    multipart_part_size = models.PositiveIntegerField(null=True, blank=True)
     # Null while a direct-to-object-storage upload is still in progress.
     upload_completed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

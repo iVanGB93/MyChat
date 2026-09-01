@@ -16,6 +16,11 @@ from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
 from .models import ChatRoom, PendingDelivery, MessageDelivery, OfflineEmailNudge
+from .relay_service import (
+    build_axion_relay_plan,
+    record_message_deliveries,
+    record_pending_deliveries,
+)
 from .push import send_message_push
 from users.models import BlockedUser, Contact, UserDevice, UserPresence, UserPresenceSession
 from users.presence import (
@@ -808,7 +813,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         recipient_id=member_id,
                         room_id=str(self.room_id),
                     )
-                    logger.info(
+                    logger.debug(
                         "[NotifyDecision] kind=message route=blocked room=%s message_id=%s sender=%s recipient=%s",
                         str(self.room_id),
                         message_id,
@@ -848,7 +853,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         room_id=str(self.room_id),
                         routing_state=routing_state,
                     )
-                    logger.info(
+                    logger.debug(
                         "[NotifyDecision] kind=message route=room_ws_active room=%s message_id=%s sender=%s recipient=%s state=%s",
                         str(self.room_id),
                         message_id,
@@ -943,7 +948,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     room_id=str(self.room_id),
                     routing_state=routing_state,
                 )
-                logger.info(
+                logger.debug(
                     "[NotifyDecision] kind=message route=%s room=%s message_id=%s sender=%s recipient=%s state=%s ws_relay=%s push=%s",
                     route_label,
                     str(self.room_id),
@@ -956,7 +961,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 )
 
             if push_recipients:
-                logger.info(
+                logger.debug(
                     "[Push] Sending push to %d offline user(s) (of %d total recipients)",
                     len(push_recipients), len(room_info["member_ids"]) - 1,
                 )
@@ -1722,7 +1727,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         "correlation_id": f"msg:{message_id}",
                     }},
                 )
-                logger.info(
+                logger.debug(
                     "[Axion] %s message_id=%s room=%s sender=%s target=%s",
                     "hydrated" if hydration else "accepted",
                     message_id,
@@ -1730,7 +1735,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     self.user.id,
                     target_recipient_id or "all",
                 )
-                logger.info(
+                logger.debug(
                     "[Axion] route plan message_id=%s live=%s offline=%s",
                     message_id,
                     plan["live_recipient_ids"],
@@ -2014,7 +2019,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             # request gaps.
             if msg_type == "sync_digest":
                 room_id = data.get("room_id", "")
-                ids = data.get("ids", [])
+                ids = data.get("ids", [])[:100]
+                entries = data.get("entries", [])[:100]
                 if not room_id or not ids:
                     return
                 member_ids = await self.get_room_member_ids(room_id)
@@ -2030,6 +2036,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                                     "event": "sync_digest",
                                     "room_id": str(room_id),
                                     "ids": ids,
+                                    "entries": entries,
                                     "from_user_id": self.user.id,
                                     "from_username": self.user.username,
                                 },
@@ -2042,11 +2049,22 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             # flush path (ids + media preserved). Server stays a dumb relay.
             if msg_type == "sync_request":
                 room_id = data.get("room_id", "")
-                ids = data.get("ids", [])
-                if not room_id or not ids:
+                ids = data.get("ids", [])[:100]
+                update_ids = data.get("update_ids", [])[:100]
+                if not room_id or (not ids and not update_ids):
                     return
                 member_ids = await self.get_room_member_ids(room_id)
-                for member_id in member_ids:
+                target_user_id = data.get("target_user_id")
+                try:
+                    target_user_id = int(target_user_id) if target_user_id else None
+                except (TypeError, ValueError):
+                    target_user_id = None
+                recipients = (
+                    [target_user_id]
+                    if target_user_id in member_ids and target_user_id != self.user.id
+                    else member_ids
+                )
+                for member_id in recipients:
                     if member_id == self.user.id:
                         continue
                     for channel in get_user_notification_channels(member_id):
@@ -2058,11 +2076,41 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                                     "event": "sync_request",
                                     "room_id": str(room_id),
                                     "ids": ids,
+                                    "update_ids": update_ids,
                                     "from_user_id": self.user.id,
                                     "from_username": self.user.username,
                                 },
                             },
                         )
+                return
+
+            # ---- Targeted versioned state repair (edit/reaction/tombstone) ----
+            if msg_type == "sync_state":
+                room_id = data.get("room_id", "")
+                states = data.get("states", [])[:100]
+                try:
+                    target_user_id = int(data.get("target_user_id"))
+                except (TypeError, ValueError):
+                    return
+                if not room_id or not states:
+                    return
+                member_ids = await self.get_room_member_ids(room_id)
+                if target_user_id not in member_ids or target_user_id == self.user.id:
+                    return
+                for channel in get_user_notification_channels(target_user_id):
+                    await self.channel_layer.send(
+                        channel,
+                        {
+                            "type": "notify",
+                            "payload": {
+                                "event": "sync_state",
+                                "room_id": str(room_id),
+                                "states": states,
+                                "from_user_id": self.user.id,
+                                "from_username": self.user.username,
+                            },
+                        },
+                    )
                 return
 
             # ---- WebRTC signaling ----
@@ -2327,52 +2375,15 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         Android app can keep its WebSocket alive briefly, but that socket is
         not a reliable delivery path once the OS freezes the process.
         """
-        try:
-            room = ChatRoom.objects.get(id=room_id)
-        except ChatRoom.DoesNotExist:
+        plan = build_axion_relay_plan(self.user, room_id)
+        if plan is None:
             return None
-        if not room.members.filter(id=self.user.id).exists():
-            return None
-        from users.models import BlockedUser
-        blockers = set(
-            BlockedUser.objects.filter(blocked=self.user).values_list("owner_id", flat=True)
-        )
-        recipient_ids = [
-            member_id for member_id in room.members.exclude(id=self.user.id).values_list("id", flat=True)
-            if member_id not in blockers
-        ]
-        presences = {
-            presence.user_id: presence
-            for presence in UserPresence.objects.filter(user_id__in=recipient_ids)
-        }
-        live_recipient_ids = []
-        for recipient_id in recipient_ids:
-            presence = presences.get(recipient_id)
-            if (
-                presence
-                and presence.notification_socket_connected
-                and presence.app_state == UserPresence.APP_STATE_ACTIVE
-                and not notification_presence_is_stale(presence)
-            ):
-                live_recipient_ids.append(recipient_id)
-        offline_recipient_ids = [
-            recipient_id for recipient_id in recipient_ids
-            if recipient_id not in live_recipient_ids
-        ]
-        if room.room_type == ChatRoom.DIRECT and not room.name:
-            room_name = self.user.username
-        else:
-            room_name = room.name or str(room.id)
-        try:
-            sender_avatar = self.user.avatar.url if self.user.avatar and self.user.avatar.name else None
-        except Exception:
-            sender_avatar = None
         return {
-            "recipient_ids": recipient_ids,
-            "live_recipient_ids": live_recipient_ids,
-            "room_name": room_name,
-            "sender_avatar": sender_avatar,
-            "offline_email_recipient_ids": offline_recipient_ids,
+            "recipient_ids": plan.recipient_ids,
+            "live_recipient_ids": plan.live_recipient_ids,
+            "room_name": plan.room_name,
+            "sender_avatar": plan.sender_avatar,
+            "offline_email_recipient_ids": plan.offline_email_recipient_ids,
         }
 
     @database_sync_to_async
@@ -2382,18 +2393,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         recipient_ids: list[int],
     ) -> None:
         """Persist the compact offline hint outside Axion's acknowledgement path."""
-        if not recipient_ids:
-            return
-        PendingDelivery.objects.bulk_create(
-            [
-                PendingDelivery(
-                    room_id=room_id,
-                    from_user_id=self.user.id,
-                    to_user_id=recipient_id,
-                )
-                for recipient_id in recipient_ids
-            ],
-            ignore_conflicts=True,
+        record_pending_deliveries(
+            room_id=room_id,
+            sender_id=self.user.id,
+            recipient_ids=recipient_ids,
         )
 
     @database_sync_to_async
@@ -2409,20 +2412,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         acknowledge before this task runs, in which case the ACK handler has
         already inserted the authoritative delivered row.
         """
-        if not message_id or not recipient_ids:
-            return
-        MessageDelivery.objects.bulk_create(
-            [
-                MessageDelivery(
-                    room_id=room_id,
-                    message_id=message_id,
-                    sender_id=self.user.id,
-                    recipient_id=recipient_id,
-                    status=MessageDelivery.STATUS_PENDING,
-                )
-                for recipient_id in recipient_ids
-            ],
-            ignore_conflicts=True,
+        record_message_deliveries(
+            room_id=room_id,
+            message_id=message_id,
+            sender_id=self.user.id,
+            recipient_ids=recipient_ids,
         )
 
     async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
@@ -2536,7 +2530,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             return False
         from django.db import transaction
 
-        logger.info(
+        logger.debug(
             "[AxionPush] start message_id=%s recipients=%s",
             message_id,
             recipient_ids,
@@ -2576,7 +2570,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             )
             reserved_recipient_ids = list(candidates.values_list("recipient_id", flat=True))
             if not reserved_recipient_ids:
-                logger.info(
+                logger.debug(
                     "[Axion] duplicate push suppressed message_id=%s room=%s",
                     message_id,
                     room_id,
@@ -2601,7 +2595,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             created_at=created_at,
             extra_data=extra_data,
         )
-        logger.info(
+        logger.debug(
             "[AxionPush] result message_id=%s recipients=%s sent=%s",
             message_id,
             reserved_recipient_ids,
