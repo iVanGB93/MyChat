@@ -76,6 +76,63 @@ class MediaUploadReliabilityTests(TransactionTestCase):
         self.assertEqual(second.data["media_id"], first.data["media_id"])
         self.assertEqual(MediaBlob.objects.count(), 1)
 
+    @override_settings(MEDIA_STORAGE_BACKEND="spaces")
+    @patch("chat.media_views.create_presigned_upload")
+    def test_direct_upload_is_idempotent_and_keeps_bytes_out_of_database(self, signed):
+        signed.return_value = {
+            "url": "https://example.invalid/signed-upload",
+            "headers": {
+                "Content-Type": "application/pdf",
+                "x-amz-meta-md5": "0123456789abcdef0123456789abcdef",
+            },
+        }
+        payload = {
+            "room_id": str(self.room.id),
+            "media_type": "document",
+            "mime": "application/pdf",
+            "message_id": "direct-message-1",
+            "size_bytes": 8,
+            "md5": "0123456789abcdef0123456789abcdef",
+        }
+        first = self.client.post("/api/chat/media/initiate/", payload, format="json")
+        second = self.client.post("/api/chat/media/initiate/", payload, format="json")
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data["media_id"], second.data["media_id"])
+        blob = MediaBlob.objects.get()
+        self.assertIsNone(blob.data)
+        self.assertEqual(blob.storage_backend, "spaces")
+        self.assertTrue(blob.object_key.startswith(f"media/{self.room.id}/"))
+
+    @override_settings(MEDIA_STORAGE_BACKEND="spaces")
+    @patch("chat.media_views.inspect_object")
+    @patch("chat.media_views.create_presigned_upload")
+    def test_direct_upload_completion_verifies_remote_metadata(self, signed, inspect):
+        signed.return_value = {"url": "https://example.invalid", "headers": {}}
+        checksum = "0123456789abcdef0123456789abcdef"
+        initiated = self.client.post(
+            "/api/chat/media/initiate/",
+            {
+                "room_id": str(self.room.id),
+                "media_type": "document",
+                "mime": "application/pdf",
+                "message_id": "direct-message-2",
+                "size_bytes": 8,
+                "md5": checksum,
+            },
+            format="json",
+        )
+        inspect.return_value = {"ContentLength": 8, "Metadata": {"md5": checksum}}
+
+        completed = self.client.post(
+            f"/api/chat/media/{initiated.data['media_id']}/complete/", {}, format="json"
+        )
+
+        self.assertEqual(completed.status_code, 200)
+        self.assertTrue(completed.data["uploaded"])
+        self.assertIsNotNone(MediaBlob.objects.get().upload_completed_at)
+
 
 class AxionMessageLifecycleTests(TransactionTestCase):
     """Exercise Axion through the real ASGI routing and notification consumer."""

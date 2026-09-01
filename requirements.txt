@@ -30,6 +30,7 @@ python-dotenv>=1.0
 Pillow>=10.0
 gunicorn>=21.0
 requests>=2.31
+boto3>=1.35,<2
 
 # Push (FCM v1 data messages for WhatsApp-style background delivery)
 # Pinned to 6.x: firebase-admin 7.x requires PyJWT>=2.10.1, which conflicts

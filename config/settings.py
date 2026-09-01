@@ -269,14 +269,22 @@ CALL_INVITE_RETRY_INTERVAL_SECONDS = int(os.getenv("CALL_INVITE_RETRY_INTERVAL_S
 # ---------------------------------------------------------------------------
 # Media blob storage (out-of-band image / voice / video)
 # ---------------------------------------------------------------------------
-# Blobs are stored in Postgres (chat.MediaBlob) behind chat.media_views so the
-# backing store can be swapped for object storage later. Retention: delete a
-# blob MEDIA_DELETE_GRACE_HOURS after every recipient confirms a verified
-# download, or after MEDIA_HARD_TTL_DAYS as a fallback for never-downloaded blobs.
+# Production media can be stored in an S3-compatible DigitalOcean Space. The
+# database backend remains available for local development and legacy rows.
 MEDIA_MAX_UPLOAD_BYTES = int(os.getenv("MEDIA_MAX_UPLOAD_BYTES", str(250 * 1024 * 1024)))
 MEDIA_DELETE_GRACE_HOURS = int(os.getenv("MEDIA_DELETE_GRACE_HOURS", "48"))
 MEDIA_HARD_TTL_DAYS = int(os.getenv("MEDIA_HARD_TTL_DAYS", "30"))
 MEDIA_CLEANUP_INTERVAL_SECONDS = int(os.getenv("MEDIA_CLEANUP_INTERVAL_SECONDS", "3600"))
+MEDIA_STORAGE_BACKEND = os.getenv("MEDIA_STORAGE_BACKEND", "database").strip().lower()
+SPACES_BUCKET = os.getenv("SPACES_BUCKET", "").strip()
+SPACES_REGION = os.getenv("SPACES_REGION", "nyc3").strip()
+SPACES_ENDPOINT = os.getenv(
+    "SPACES_ENDPOINT", f"https://{SPACES_REGION}.digitaloceanspaces.com"
+).strip()
+SPACES_ACCESS_KEY = os.getenv("SPACES_ACCESS_KEY", "").strip()
+SPACES_SECRET_KEY = os.getenv("SPACES_SECRET_KEY", "").strip()
+MEDIA_PRESIGNED_UPLOAD_SECONDS = int(os.getenv("MEDIA_PRESIGNED_UPLOAD_SECONDS", "900"))
+MEDIA_PRESIGNED_DOWNLOAD_SECONDS = int(os.getenv("MEDIA_PRESIGNED_DOWNLOAD_SECONDS", "300"))
 CELERY_BEAT_SCHEDULE = {
     "sweep-stale-message-deliveries": {
         "task": "chat.tasks.sweep_stale_message_deliveries",

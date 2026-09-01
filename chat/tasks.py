@@ -113,21 +113,38 @@ def cleanup_expired_media() -> dict:
     Clients keep the thumbnail + metadata in their own local message row, so the
     chat history stays intact after the server blob is gone.
     """
+    from .media_storage import delete_object
     from .models import MediaBlob
 
     now = timezone.now()
     hard_ttl_days = int(getattr(settings, "MEDIA_HARD_TTL_DAYS", 30))
     hard_cutoff = now - timedelta(days=hard_ttl_days)
 
+    def delete_rows(queryset) -> int:
+        deleted = 0
+        for blob in queryset.iterator():
+            if blob.storage_backend == "spaces" and blob.object_key:
+                try:
+                    delete_object(blob.object_key)
+                except Exception:
+                    logger.exception(
+                        "[MediaCleanup] object deletion failed media=%s key=%s",
+                        blob.id,
+                        blob.object_key,
+                    )
+                    # Keep the row so the next sweep retries object deletion.
+                    continue
+            blob.delete()
+            deleted += 1
+        return deleted
+
     confirmed_qs = MediaBlob.objects.filter(
         delete_after__isnull=False, delete_after__lte=now
     )
-    confirmed_deleted = confirmed_qs.count()
-    confirmed_qs.delete()
+    confirmed_deleted = delete_rows(confirmed_qs)
 
     stale_qs = MediaBlob.objects.filter(created_at__lt=hard_cutoff)
-    stale_deleted = stale_qs.count()
-    stale_qs.delete()
+    stale_deleted = delete_rows(stale_qs)
 
     total = confirmed_deleted + stale_deleted
     if total:

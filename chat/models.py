@@ -212,9 +212,8 @@ class MediaBlob(models.Model):
     ride the chat WebSocket. The chat message carries only a lightweight pointer
     (media_id + sha256 + thumb); the bytes are uploaded/downloaded over HTTP.
 
-    Storage is intentionally kept behind this model + `chat.media_store` so the
-    backing store (currently Postgres `bytea`) can be swapped for object storage
-    (S3 / R2) later without changing the API or the wire protocol.
+    New production blobs live in object storage; legacy rows can retain their
+    bytes in Postgres so old messages remain downloadable during migration.
 
     Retention: the row (and its bytes) is deleted 48h after every recipient has
     confirmed a verified, persisted download (`delete_after`), or after a hard
@@ -249,8 +248,12 @@ class MediaBlob(models.Model):
     duration_ms = models.PositiveIntegerField(null=True, blank=True)
     width = models.PositiveIntegerField(null=True, blank=True)
     height = models.PositiveIntegerField(null=True, blank=True)
-    # The blob bytes. Kept in a dedicated table so it never touches hot queries.
-    data = models.BinaryField()
+    # Legacy database bytes. New object-storage rows leave this null.
+    data = models.BinaryField(null=True, blank=True)
+    storage_backend = models.CharField(max_length=16, default="database")
+    object_key = models.CharField(max_length=512, blank=True, default="")
+    # Null while a direct-to-object-storage upload is still in progress.
+    upload_completed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # Set once every recipient has confirmed a verified download.
     all_confirmed_at = models.DateTimeField(null=True, blank=True)

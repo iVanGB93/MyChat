@@ -1,0 +1,96 @@
+"""DigitalOcean Spaces adapter for Axonic's out-of-band media lane."""
+
+from __future__ import annotations
+
+from typing import BinaryIO
+
+from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+
+
+def uses_spaces() -> bool:
+    return getattr(settings, "MEDIA_STORAGE_BACKEND", "database") == "spaces"
+
+
+def _client():
+    missing = [
+        name
+        for name in ("SPACES_BUCKET", "SPACES_ACCESS_KEY", "SPACES_SECRET_KEY")
+        if not getattr(settings, name, "")
+    ]
+    if missing:
+        raise ImproperlyConfigured(
+            "Spaces media storage is enabled but these settings are missing: "
+            + ", ".join(missing)
+        )
+
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        "s3",
+        region_name=settings.SPACES_REGION,
+        endpoint_url=settings.SPACES_ENDPOINT,
+        aws_access_key_id=settings.SPACES_ACCESS_KEY,
+        aws_secret_access_key=settings.SPACES_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+    )
+
+
+def object_key_for(blob) -> str:
+    return f"media/{blob.room_id}/{blob.id}"
+
+
+def create_presigned_upload(*, key: str, mime: str, md5: str) -> dict:
+    params = {
+        "Bucket": settings.SPACES_BUCKET,
+        "Key": key,
+        "ContentType": mime,
+        "Metadata": {"md5": md5},
+    }
+    url = _client().generate_presigned_url(
+        "put_object",
+        Params=params,
+        ExpiresIn=settings.MEDIA_PRESIGNED_UPLOAD_SECONDS,
+        HttpMethod="PUT",
+    )
+    return {
+        "url": url,
+        "headers": {
+            "Content-Type": mime,
+            "x-amz-meta-md5": md5,
+        },
+    }
+
+
+def upload_file(*, key: str, fileobj: BinaryIO, mime: str, md5: str) -> None:
+    _client().upload_fileobj(
+        fileobj,
+        settings.SPACES_BUCKET,
+        key,
+        ExtraArgs={
+            "ContentType": mime,
+            "Metadata": {"md5": md5},
+        },
+    )
+
+
+def inspect_object(key: str) -> dict:
+    return _client().head_object(Bucket=settings.SPACES_BUCKET, Key=key)
+
+
+def create_presigned_download(*, key: str, disposition: str) -> str:
+    return _client().generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": settings.SPACES_BUCKET,
+            "Key": key,
+            "ResponseContentDisposition": disposition,
+        },
+        ExpiresIn=settings.MEDIA_PRESIGNED_DOWNLOAD_SECONDS,
+        HttpMethod="GET",
+    )
+
+
+def delete_object(key: str) -> None:
+    _client().delete_object(Bucket=settings.SPACES_BUCKET, Key=key)
