@@ -4,6 +4,8 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
+from django.db import transaction
+from django.db.models import F, Q
 from django.utils import timezone
 
 from .models import MessageDelivery, ChatRoom
@@ -20,14 +22,20 @@ def sweep_stale_message_deliveries() -> dict:
     periodically checking pending per-message delivery metadata.
     """
     timeout_s = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
-    cutoff = timezone.now() - timedelta(seconds=timeout_s)
+    retry_s = int(getattr(settings, "MESSAGE_DELIVERY_PUSH_RETRY_SECONDS", 300))
+    max_attempts = int(getattr(settings, "MESSAGE_DELIVERY_PUSH_MAX_ATTEMPTS", 3))
+    now = timezone.now()
+    cutoff = now - timedelta(seconds=timeout_s)
+    retry_cutoff = now - timedelta(seconds=retry_s)
 
     rows = list(
         MessageDelivery.objects.filter(
             status=MessageDelivery.STATUS_PENDING,
             push_sent_at__isnull=True,
             created_at__lte=cutoff,
+            push_attempt_count__lt=max_attempts,
         )
+        .filter(Q(last_push_attempt_at__isnull=True) | Q(last_push_attempt_at__lte=retry_cutoff))
         .select_related("sender", "room")
         .order_by("room_id", "message_id", "sender_id", "recipient_id")
     )
@@ -44,12 +52,35 @@ def sweep_stale_message_deliveries() -> dict:
     for row in rows:
         grouped[(str(row.room_id), row.message_id, row.sender_id)].append(row)
 
-    now = timezone.now()
     marked = 0
     skipped = 0
 
     for (room_id_str, message_id, sender_id), deliveries in grouped.items():
-        recipient_ids = [d.recipient_id for d in deliveries]
+        delivery_ids = [d.id for d in deliveries]
+        # Reserve the retry before contacting FCM. This shares the same durable
+        # attempt state as the realtime consumer, so duplicate Axion frames and
+        # overlapping Beat sweeps cannot repeatedly notify the same recipient.
+        with transaction.atomic():
+            reserved = MessageDelivery.objects.select_for_update().filter(
+                id__in=delivery_ids,
+                status=MessageDelivery.STATUS_PENDING,
+                push_sent_at__isnull=True,
+                push_attempt_count__lt=max_attempts,
+            ).filter(
+                Q(last_push_attempt_at__isnull=True)
+                | Q(last_push_attempt_at__lte=retry_cutoff)
+            )
+            reserved_ids = list(reserved.values_list("id", flat=True))
+            if not reserved_ids:
+                continue
+            reserved.update(
+                last_push_attempt_at=now,
+                push_attempt_count=F("push_attempt_count") + 1,
+            )
+
+        recipient_ids = [
+            d.recipient_id for d in deliveries if d.id in reserved_ids
+        ]
         sender_name = deliveries[0].sender.username
         room = deliveries[0].room
         if room.room_type == ChatRoom.DIRECT and not room.name:
@@ -68,9 +99,9 @@ def sweep_stale_message_deliveries() -> dict:
         )
 
         if not sent:
-            skipped += len(deliveries)
+            skipped += len(reserved_ids)
             logger.warning(
-                "[DeliverySweep] push send failed room=%s sender=%s message_id=%s recipients=%d",
+                "[DeliverySweep] push unavailable room=%s sender=%s message_id=%s recipients=%d; retry is backed off",
                 room_id_str,
                 sender_id,
                 message_id,
@@ -79,7 +110,7 @@ def sweep_stale_message_deliveries() -> dict:
             continue
 
         updated = MessageDelivery.objects.filter(
-            id__in=[d.id for d in deliveries],
+            id__in=reserved_ids,
             push_sent_at__isnull=True,
         ).update(push_sent_at=now)
         marked += updated
@@ -98,6 +129,17 @@ def sweep_stale_message_deliveries() -> dict:
         "rows_marked": marked,
         "rows_skipped": skipped,
     }
+
+
+@shared_task
+def cleanup_message_delivery_metadata() -> dict:
+    """Bound server-side delivery metadata while clients retain chat history."""
+    retention_days = int(getattr(settings, "MESSAGE_DELIVERY_RETENTION_DAYS", 30))
+    cutoff = timezone.now() - timedelta(days=retention_days)
+    deleted, _ = MessageDelivery.objects.filter(created_at__lt=cutoff).delete()
+    if deleted:
+        logger.info("[DeliveryCleanup] deleted %d expired metadata row(s)", deleted)
+    return {"deleted": deleted, "retention_days": retention_days}
 
 
 @shared_task

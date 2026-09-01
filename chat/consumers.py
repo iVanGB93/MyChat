@@ -11,7 +11,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
@@ -2538,10 +2538,13 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
         # Reserve each per-message push before contacting FCM. If the sender
         # reconnects and replays an accepted message, the same durable delivery
-        # row prevents another notification. A stale reservation becomes
-        # eligible again so a worker crash cannot suppress delivery forever.
+        # row prevents another notification. Failed attempts use the same
+        # bounded backoff as the Beat sweep, so missing device registrations do
+        # not hammer FCM or Railway forever.
         now = timezone.now()
-        stale_before = now - timedelta(minutes=2)
+        retry_s = int(getattr(settings, "MESSAGE_DELIVERY_PUSH_RETRY_SECONDS", 300))
+        max_attempts = int(getattr(settings, "MESSAGE_DELIVERY_PUSH_MAX_ATTEMPTS", 3))
+        retry_before = now - timedelta(seconds=retry_s)
         with transaction.atomic():
             MessageDelivery.objects.bulk_create(
                 [
@@ -2563,10 +2566,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 recipient_id__in=recipient_ids,
                 status=MessageDelivery.STATUS_PENDING,
                 push_sent_at__isnull=True,
+                push_attempt_count__lt=max_attempts,
             ).filter(
-                Q(routed_at__isnull=True)
-                | ~Q(routed_via=MessageDelivery.ROUTE_PUSH)
-                | Q(routed_at__lt=stale_before)
+                Q(last_push_attempt_at__isnull=True)
+                | Q(last_push_attempt_at__lte=retry_before)
             )
             reserved_recipient_ids = list(candidates.values_list("recipient_id", flat=True))
             if not reserved_recipient_ids:
@@ -2579,6 +2582,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             candidates.update(
                 routed_via=MessageDelivery.ROUTE_PUSH,
                 routed_at=now,
+                last_push_attempt_at=now,
+                push_attempt_count=F("push_attempt_count") + 1,
             )
 
         sent = send_message_push(
@@ -2613,10 +2618,10 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         if sent:
             delivery_rows.update(push_sent_at=timezone.now())
         else:
-            # Release the reservation for the next reconnect/background sweep.
+            # Keep the failed attempt timestamp so the next durable retry is
+            # backed off instead of immediately repeating on every replay.
             delivery_rows.update(
-                routed_via=MessageDelivery.ROUTE_UNKNOWN,
-                routed_at=None,
+                routed_via=MessageDelivery.ROUTE_PENDING_ONLY,
             )
         return sent
 

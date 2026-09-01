@@ -263,6 +263,18 @@ PRESENCE_STALE_SECONDS = int(os.getenv("PRESENCE_STALE_SECONDS", "70"))
 MESSAGE_DELIVERY_SWEEP_INTERVAL_SECONDS = int(
     os.getenv("MESSAGE_DELIVERY_SWEEP_INTERVAL_SECONDS", "15")
 )
+MESSAGE_DELIVERY_PUSH_RETRY_SECONDS = int(
+    os.getenv("MESSAGE_DELIVERY_PUSH_RETRY_SECONDS", "300")
+)
+MESSAGE_DELIVERY_PUSH_MAX_ATTEMPTS = int(
+    os.getenv("MESSAGE_DELIVERY_PUSH_MAX_ATTEMPTS", "3")
+)
+MESSAGE_DELIVERY_RETENTION_DAYS = int(
+    os.getenv("MESSAGE_DELIVERY_RETENTION_DAYS", "30")
+)
+MESSAGE_DELIVERY_CLEANUP_INTERVAL_SECONDS = int(
+    os.getenv("MESSAGE_DELIVERY_CLEANUP_INTERVAL_SECONDS", "21600")
+)
 CALL_INVITE_ACK_TIMEOUT_SECONDS = int(os.getenv("CALL_INVITE_ACK_TIMEOUT_SECONDS", "12"))
 CALL_INVITE_RETRY_INTERVAL_SECONDS = int(os.getenv("CALL_INVITE_RETRY_INTERVAL_SECONDS", "20"))
 
@@ -299,6 +311,10 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup-expired-media": {
         "task": "chat.tasks.cleanup_expired_media",
         "schedule": MEDIA_CLEANUP_INTERVAL_SECONDS,
+    },
+    "cleanup-message-delivery-metadata": {
+        "task": "chat.tasks.cleanup_message_delivery_metadata",
+        "schedule": MESSAGE_DELIVERY_CLEANUP_INTERVAL_SECONDS,
     },
 }
 

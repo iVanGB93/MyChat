@@ -161,6 +161,8 @@ class MessageDelivery(models.Model):
     )
     delivered_at = models.DateTimeField(null=True, blank=True)
     push_sent_at = models.DateTimeField(null=True, blank=True)
+    last_push_attempt_at = models.DateTimeField(null=True, blank=True)
+    push_attempt_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         constraints = [

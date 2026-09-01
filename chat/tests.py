@@ -20,7 +20,11 @@ from .consumers import (
     _connected_notification_users,
 )
 from .models import ChatRoom, MediaBlob, MessageDelivery, PendingDelivery
-from .tasks import cleanup_expired_media
+from .tasks import (
+    cleanup_expired_media,
+    cleanup_message_delivery_metadata,
+    sweep_stale_message_deliveries,
+)
 from .serializers import MemberSerializer
 from users.models import UserPresence, UserPresenceSession
 from users.presence import aggregate_user_presence
@@ -274,6 +278,74 @@ class MediaCleanupRetentionTests(TransactionTestCase):
 
         self.assertTrue(MediaBlob.objects.filter(id=stale.id).exists())
         self.assertEqual(result["deleted"], 0)
+
+
+class MessageDeliveryMaintenanceTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.sender = User.objects.create_user(
+            username="delivery-sender",
+            email="delivery-sender@example.com",
+            password="test-password",
+        )
+        self.recipient = User.objects.create_user(
+            username="delivery-recipient",
+            email="delivery-recipient@example.com",
+            password="test-password",
+        )
+        self.room = ChatRoom.objects.create(room_type=ChatRoom.DIRECT)
+        self.room.members.set([self.sender, self.recipient])
+
+    def _delivery(self, message_id="delivery-maintenance-1"):
+        row = MessageDelivery.objects.create(
+            room=self.room,
+            message_id=message_id,
+            sender=self.sender,
+            recipient=self.recipient,
+        )
+        MessageDelivery.objects.filter(id=row.id).update(
+            created_at=timezone.now() - timedelta(minutes=10),
+        )
+        row.refresh_from_db()
+        return row
+
+    @override_settings(
+        MESSAGE_ACK_TIMEOUT_SECONDS=8,
+        MESSAGE_DELIVERY_PUSH_RETRY_SECONDS=300,
+        MESSAGE_DELIVERY_PUSH_MAX_ATTEMPTS=3,
+    )
+    @patch("chat.tasks.send_message_push", return_value=False)
+    def test_failed_push_is_backed_off_instead_of_retried_each_sweep(self, send_push):
+        row = self._delivery()
+
+        first = sweep_stale_message_deliveries()
+        second = sweep_stale_message_deliveries()
+
+        row.refresh_from_db()
+        self.assertEqual(send_push.call_count, 1)
+        self.assertEqual(row.push_attempt_count, 1)
+        self.assertIsNotNone(row.last_push_attempt_at)
+        self.assertIsNone(row.push_sent_at)
+        self.assertEqual(first["rows_skipped"], 1)
+        self.assertEqual(second["rows_scanned"], 0)
+
+    @override_settings(MESSAGE_DELIVERY_RETENTION_DAYS=30)
+    def test_cleanup_deletes_only_expired_delivery_metadata(self):
+        expired = self._delivery("delivery-expired")
+        fresh = self._delivery("delivery-fresh")
+        MessageDelivery.objects.filter(id=expired.id).update(
+            created_at=timezone.now() - timedelta(days=31),
+        )
+        MessageDelivery.objects.filter(id=fresh.id).update(
+            created_at=timezone.now() - timedelta(days=29),
+        )
+
+        result = cleanup_message_delivery_metadata()
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertFalse(MessageDelivery.objects.filter(id=expired.id).exists())
+        self.assertTrue(MessageDelivery.objects.filter(id=fresh.id).exists())
 
 
 class AxionMessageLifecycleTests(TransactionTestCase):
