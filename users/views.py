@@ -978,8 +978,18 @@ class ContactViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Contact.objects.filter(owner=self.request.user).select_related("contact")
 
-    def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # Accepting again (or retrying after a lost response) must not violate
+        # the unique owner/contact constraint and turn success into a 500.
+        contact, created = Contact.objects.get_or_create(
+            owner=request.user, contact=serializer.validated_data["contact"],
+        )
+        return Response(
+            self.get_serializer(contact).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class BlockedUserViewSet(viewsets.ModelViewSet):

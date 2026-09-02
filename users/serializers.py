@@ -165,6 +165,14 @@ class AccountDeleteSerializer(serializers.Serializer):
 class ContactSerializer(serializers.ModelSerializer):
     contact_detail = UserSerializer(source="contact", read_only=True)
 
+    def validate_contact(self, value):
+        owner = self.context["request"].user
+        if value.pk == owner.pk:
+            raise serializers.ValidationError("You cannot add yourself as a contact.")
+        if BlockedUser.objects.filter(owner=owner, blocked=value).exists():
+            raise serializers.ValidationError("Unblock this user before adding them as a contact.")
+        return value
+
     class Meta:
         model = Contact
         fields = ("id", "contact", "contact_detail", "created_at")
