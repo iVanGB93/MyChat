@@ -42,10 +42,15 @@ def object_key_for(blob) -> str:
 
 
 def create_presigned_upload(*, key: str, mime: str, md5: str) -> dict:
+    # Content-Type is intentionally NOT signed here: React Native's networking
+    # layer overrides a Blob-bodied request's Content-Type with the blob's own
+    # (extension-derived) type, which would never match a signed value and
+    # would break the whole request's SigV4 signature. The object's real
+    # content type is served from MediaBlob.mime in download_media, not from
+    # whatever Spaces stores, so this costs nothing.
     params = {
         "Bucket": settings.SPACES_BUCKET,
         "Key": key,
-        "ContentType": mime,
         "Metadata": {"md5": md5},
     }
     url = _client().generate_presigned_url(
@@ -57,7 +62,6 @@ def create_presigned_upload(*, key: str, mime: str, md5: str) -> dict:
     return {
         "url": url,
         "headers": {
-            "Content-Type": mime,
             "x-amz-meta-md5": md5,
         },
     }
