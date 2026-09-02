@@ -48,6 +48,19 @@ def create_presigned_upload(*, key: str, mime: str, md5: str) -> dict:
         "ContentType": mime,
         "Metadata": {"md5": md5},
     }
+    url = _client().generate_presigned_url(
+        "put_object",
+        Params=params,
+        ExpiresIn=settings.MEDIA_PRESIGNED_UPLOAD_SECONDS,
+        HttpMethod="PUT",
+    )
+    return {
+        "url": url,
+        "headers": {
+            "Content-Type": mime,
+            "x-amz-meta-md5": md5,
+        },
+    }
 
 
 def create_multipart_upload(*, key: str, mime: str, md5: str) -> str:
@@ -117,19 +130,6 @@ def abort_multipart_upload(*, key: str, upload_id: str) -> None:
         code = str((response.get("Error") or {}).get("Code", ""))
         if code not in {"NoSuchUpload", "404"}:
             raise
-    url = _client().generate_presigned_url(
-        "put_object",
-        Params=params,
-        ExpiresIn=settings.MEDIA_PRESIGNED_UPLOAD_SECONDS,
-        HttpMethod="PUT",
-    )
-    return {
-        "url": url,
-        "headers": {
-            "Content-Type": mime,
-            "x-amz-meta-md5": md5,
-        },
-    }
 
 
 def upload_file(*, key: str, fileobj: BinaryIO, mime: str, md5: str) -> None:
