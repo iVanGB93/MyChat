@@ -1,22 +1,19 @@
-"""Database-backed file storage.
+"""Avatar storage with immutable Spaces objects and legacy database reads.
 
-Stores uploaded files (currently used for user avatars) as binary blobs in the
-application database rather than on the local filesystem.  Useful for ephemeral
-hosts (Railway, Heroku, etc.) where the filesystem is wiped on every redeploy.
-
-The storage exposes a ``/media-db/<name>`` URL.  A small view (see
-``serve_blob``) streams the bytes back to clients.
-
-Tradeoffs: blobs bloat the database and bypass any CDN.  For large user bases
-swap this out for S3 / R2 / GCS.
+The historic class name is retained for existing Django field migrations.
+PROFILE_MEDIA_STORAGE_BACKEND chooses where new uploads go; stored names
+determine where existing files are read, independently of that setting.
 """
 
 from __future__ import annotations
 
 import os
+import uuid
+import re
 from urllib.parse import quote
 
 from django.core.files.base import ContentFile
+from django.conf import settings
 from django.core.files.storage import Storage
 from django.db import models
 from django.utils.deconstruct import deconstructible
@@ -45,10 +42,19 @@ class DatabaseStorage(Storage):
     # Storage API ----------------------------------------------------------
 
     def _open(self, name, mode="rb"):
+        if is_profile_object(name):
+            from chat.media_storage import _client
+            body = _client().get_object(Bucket=settings.SPACES_BUCKET, Key=name)["Body"]
+            try:
+                return ContentFile(body.read(), name=name)
+            finally:
+                body.close()
         blob = FileBlob.objects.get(pk=name)
         return ContentFile(bytes(blob.data), name=name)
 
     def _save(self, name, content):
+        if getattr(settings, "PROFILE_MEDIA_STORAGE_BACKEND", "database") == "spaces":
+            return save_profile_object(name, content)
         content.seek(0)
         data = content.read()
         content_type = getattr(content, "content_type", "") or ""
@@ -63,9 +69,23 @@ class DatabaseStorage(Storage):
         return name
 
     def delete(self, name):
+        if is_profile_object(name):
+            from chat.media_storage import delete_object
+            delete_object(name)
+            return
         FileBlob.objects.filter(pk=name).delete()
 
     def exists(self, name):
+        if is_profile_object(name):
+            from chat.media_storage import _client
+            try:
+                _client().head_object(Bucket=settings.SPACES_BUCKET, Key=name)
+                return True
+            except Exception as error:
+                code = str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+                if code in {"404", "NoSuchKey", "NotFound"}:
+                    return False
+                raise
         return FileBlob.objects.filter(pk=name).exists()
 
     def listdir(self, path):  # pragma: no cover - rarely used
@@ -83,9 +103,14 @@ class DatabaseStorage(Storage):
         return sorted(dirs), files
 
     def size(self, name):
+        if is_profile_object(name):
+            from chat.media_storage import _client
+            return _client().head_object(Bucket=settings.SPACES_BUCKET, Key=name)["ContentLength"]
         return FileBlob.objects.filter(pk=name).values_list("size", flat=True).first() or 0
 
     def url(self, name):
+        if is_profile_object(name):
+            return "/media-profile/" + quote(name)
         # Mirrors MEDIA_URL but routed through ``serve_blob``.
         return "/media-db/" + quote(name)
 
@@ -108,3 +133,20 @@ class DatabaseStorage(Storage):
 
 # Single shared instance — referenced by model fields.
 db_storage = DatabaseStorage()
+
+
+def is_profile_object(name: str) -> bool:
+    return bool(re.fullmatch(r"profile-objects/[a-f0-9]{32}\.[a-z0-9]{1,8}", str(name)))
+
+
+def save_profile_object(name, content):
+    """Immutable keys make the phone's existing disk image cache safe to reuse."""
+    from chat.media_storage import upload_file
+    extension = os.path.splitext(name)[1].lower().lstrip(".")
+    if not re.fullmatch(r"[a-z0-9]{1,8}", extension):
+        extension = "img"
+    key = f"profile-objects/{uuid.uuid4().hex}.{extension}"
+    content.seek(0)
+    upload_file(key=key, fileobj=content,
+                mime=getattr(content, "content_type", "") or "application/octet-stream", md5="")
+    return key

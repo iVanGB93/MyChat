@@ -429,6 +429,10 @@ class CallHistoryView(generics.ListAPIView):
 
     serializer_class = CallLogSerializer
 
+    def post(self, request):
+        from config.metadata_sync import metadata_delta
+        return metadata_delta(request, self.get_serializer(self.get_queryset(), many=True).data)
+
     def get_queryset(self):
         from django.db.models import Q
 

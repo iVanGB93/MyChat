@@ -1669,6 +1669,13 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 if not plan:
                     await self.send(text_data=json.dumps({"type": "server_error", "op": "send_message"}))
                     return
+                # A retry must not fan an old message out to newly joined group
+                # members. The snapshot may only narrow server-validated peers.
+                frozen = data.get("expected_recipient_ids")
+                if isinstance(frozen, list):
+                    allowed = {int(value) for value in frozen if str(value).isdigit()}
+                    for key in ("recipient_ids", "live_recipient_ids", "offline_email_recipient_ids"):
+                        plan[key] = [user_id for user_id in plan[key] if user_id in allowed]
                 if hydration and target_recipient_id not in plan["recipient_ids"]:
                     await self.send(text_data=json.dumps({
                         "type": "server_error",
@@ -1680,6 +1687,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "type", "room_id", "id", "message", "message_type",
                     "created_at", "sender", "sender_id", "hydration",
                     "target_recipient_id",
+                    "expected_recipient_ids",
                 }
                 payload = {
                     "event": "new_message",
@@ -1709,6 +1717,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     "type": "message_server_ack",
                     "room_id": room_id,
                     "message_id": message_id,
+                    "recipient_ids": plan["recipient_ids"],
                     "correlation_id": f"msg:{message_id}",
                 }))
                 # Mirror the control acknowledgement through the user's
@@ -1724,6 +1733,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         "type": "message_server_ack",
                         "room_id": room_id,
                         "message_id": message_id,
+                        "recipient_ids": plan["recipient_ids"],
                         "correlation_id": f"msg:{message_id}",
                     }},
                 )
@@ -1910,6 +1920,14 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 return
 
             # ---- Message delivery ack (for users who received via notification WS) ----
+            if msg_type == "receipts_stored":
+                entries = data.get("entries")
+                if not isinstance(entries, list):
+                    return
+                accepted = await self.confirm_sender_receipts(entries[:100])
+                await self.send(text_data=json.dumps({"type": "receipts_stored_ack", "entries": accepted}))
+                return
+
             if msg_type == "message_ack":
                 message_id = data.get("message_id", "")
                 sender_id = data.get("sender_id")
@@ -1936,6 +1954,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                         "event": "message_delivery_ack", "message_id": message_id,
                         "by_user_id": self.user.id, "by_username": self.user.username,
                         "room_id": room_id,
+                        "delivered_at": acked,
                     }},
                 )
                 return
@@ -2419,6 +2438,11 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             recipient_ids=recipient_ids,
         )
 
+    @database_sync_to_async
+    def confirm_sender_receipts(self, entries: list[dict]) -> list[dict]:
+        from .receipt_service import confirm_sender_receipts
+        return confirm_sender_receipts(self.user.id, entries)
+
     async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
         """Reserve one cooldown slot per recipient, then send outside Axion's hot path."""
         recipients = await self.reserve_offline_email_nudges(room_id, recipient_ids)
@@ -2626,7 +2650,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         return sent
 
     @database_sync_to_async
-    def validate_message_ack_notif(self, message_id: str, sender_id: int, room_id: str) -> bool:
+    def validate_message_ack_notif(self, message_id: str, sender_id: int, room_id: str) -> str | None:
         """Validate and durably record a peer delivery tick.
 
         The row contains no message content.  It lets a sender reconcile a
@@ -2634,7 +2658,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         missed.
         """
         if not message_id:
-            return False
+            return None
         valid_members = ChatRoom.objects.filter(id=room_id, members=self.user).filter(
             members=sender_id,
         ).exists()
@@ -2660,7 +2684,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 from_user_id=sender_id,
                 to_user_id=self.user.id,
             ).delete()
-        return valid_members
+            return delivery.delivered_at.isoformat() if delivery.delivered_at else timezone.now().isoformat()
+        return None
 
     @database_sync_to_async
     def mark_call_invite_acked(self, call_id: str) -> bool:

@@ -24,6 +24,8 @@ CHANNEL_LAYERS = {
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
+MEDIA_STORAGE_BACKEND = "database"
+PROFILE_MEDIA_STORAGE_BACKEND = "database"
 
 # Keep password-based tests fast while preserving Django's password behavior.
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

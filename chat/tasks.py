@@ -134,9 +134,14 @@ def sweep_stale_message_deliveries() -> dict:
 @shared_task
 def cleanup_message_delivery_metadata() -> dict:
     """Bound server-side delivery metadata while clients retain chat history."""
-    retention_days = int(getattr(settings, "MESSAGE_DELIVERY_RETENTION_DAYS", 30))
+    retention_days = int(getattr(settings, "MESSAGE_RECEIPT_CONFIRMED_RETENTION_DAYS", 7))
     cutoff = timezone.now() - timedelta(days=retention_days)
-    deleted, _ = MessageDelivery.objects.filter(created_at__lt=cutoff).delete()
+    # Never discard an unresolved receipt just because it is old. Older apps
+    # do not confirm local storage; retain their rows until they can upgrade.
+    deleted, _ = MessageDelivery.objects.filter(
+        status=MessageDelivery.STATUS_DELIVERED,
+        sender_confirmed_at__lt=cutoff,
+    ).delete()
     if deleted:
         logger.info("[DeliveryCleanup] deleted %d expired metadata row(s)", deleted)
     return {"deleted": deleted, "retention_days": retention_days}

@@ -330,12 +330,14 @@ class MessageDeliveryMaintenanceTests(TransactionTestCase):
         self.assertEqual(first["rows_skipped"], 1)
         self.assertEqual(second["rows_scanned"], 0)
 
-    @override_settings(MESSAGE_DELIVERY_RETENTION_DAYS=30)
+    @override_settings(MESSAGE_RECEIPT_CONFIRMED_RETENTION_DAYS=7)
     def test_cleanup_deletes_only_expired_delivery_metadata(self):
         expired = self._delivery("delivery-expired")
         fresh = self._delivery("delivery-fresh")
         MessageDelivery.objects.filter(id=expired.id).update(
             created_at=timezone.now() - timedelta(days=31),
+            status=MessageDelivery.STATUS_DELIVERED,
+            sender_confirmed_at=timezone.now() - timedelta(days=8),
         )
         MessageDelivery.objects.filter(id=fresh.id).update(
             created_at=timezone.now() - timedelta(days=29),
@@ -470,6 +472,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
                 )
                 self.assertEqual(server_ack["message_id"], "direct-message-1")
                 self.assertEqual(server_ack["room_id"], str(room.id))
+                self.assertEqual(server_ack["recipient_ids"], [self.recipient.id])
 
                 incoming = await self._receive_until(
                     recipient_socket,
@@ -500,6 +503,15 @@ class AxionMessageLifecycleTests(TransactionTestCase):
                         status=MessageDelivery.STATUS_DELIVERED,
                     ).exists()
                 )
+                await sender_socket.send_json_to({
+                    "type": "receipts_stored",
+                    "entries": [{"room_id": str(room.id), "message_id": "direct-message-1",
+                                 "recipient_ids": [self.recipient.id]}],
+                })
+                stored_ack = await self._receive_until(
+                    sender_socket, lambda frame: frame.get("type") == "receipts_stored_ack",
+                )
+                self.assertEqual(stored_ack["entries"][0]["recipient_ids"], [self.recipient.id])
             finally:
                 await self._disconnect_all(sender_socket, recipient_socket)
 
@@ -512,6 +524,7 @@ class AxionMessageLifecycleTests(TransactionTestCase):
         self.assertEqual(delivery.sender, self.sender)
         self.assertEqual(delivery.room, room)
         self.assertIsNotNone(delivery.delivered_at)
+        self.assertIsNotNone(delivery.sender_confirmed_at)
         self.assertFalse(
             PendingDelivery.objects.filter(
                 room=room,

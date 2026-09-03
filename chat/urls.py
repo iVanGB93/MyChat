@@ -10,6 +10,7 @@ urlpatterns = [
     path("", include(router.urls)),
     path("messages/send/", views.send_message, name="send-message"),
     path("messages/ack/", views.ack_message_delivery, name="ack-message-delivery"),
+    path("messages/ack-batch/", views.ack_message_delivery_batch, name="ack-message-delivery-batch"),
     path("messages/delivery-status/", views.message_delivery_status, name="message-delivery-status"),
     path("media/", media_views.upload_media, name="media-upload"),
     path("media/initiate/", media_views.initiate_media_upload, name="media-upload-initiate"),

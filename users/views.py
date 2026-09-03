@@ -2,7 +2,7 @@ import hashlib
 
 from django.contrib.auth import get_user_model
 from django.db.models import Q
-from django.http import Http404, HttpResponse
+from django.http import Http404, HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from django.views.decorators.cache import cache_control
 from rest_framework import generics, permissions, status, viewsets
@@ -10,6 +10,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
+from rest_framework.decorators import action
 
 from .db_storage import FileBlob
 from .models import BlockedUser, Contact, PasswordResetRequest, PendingRegistration, UserDevice
@@ -40,6 +41,27 @@ def serve_blob(request, name: str):
         raise Http404("Not found")
     response = HttpResponse(bytes(blob.data), content_type=blob.content_type or "application/octet-stream")
     response["Content-Length"] = str(blob.size or len(blob.data))
+    return response
+
+
+@cache_control(public=True, max_age=300)
+def serve_profile_object(request, name: str):
+    """Stable avatar URL; bytes go directly from private Spaces to the phone.
+
+    Only unguessable profile-object keys are allowed, never private chat media.
+    The signed URL outlives this short redirect cache. Old DB URLs still work.
+    """
+    from django.conf import settings
+    from .db_storage import is_profile_object
+    from chat.media_storage import _client
+    if not is_profile_object(name):
+        raise Http404("Not found")
+    url = _client().generate_presigned_url(
+        "get_object", Params={"Bucket": settings.SPACES_BUCKET, "Key": name},
+        ExpiresIn=3600,
+    )
+    response = HttpResponseRedirect(url)
+    response["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -975,8 +997,13 @@ class ContactViewSet(viewsets.ModelViewSet):
 
     serializer_class = ContactSerializer
 
+    @action(detail=False, methods=["post"], url_path="sync")
+    def sync_metadata(self, request):
+        from config.metadata_sync import metadata_delta
+        return metadata_delta(request, self.get_serializer(self.get_queryset(), many=True).data, "contact")
+
     def get_queryset(self):
-        return Contact.objects.filter(owner=self.request.user).select_related("contact")
+        return Contact.objects.filter(owner=self.request.user).select_related("contact__profile", "contact__presence")
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

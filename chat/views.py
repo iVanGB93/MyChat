@@ -38,6 +38,11 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
 
     serializer_class = ChatRoomSerializer
 
+    @action(detail=False, methods=["post"], url_path="sync")
+    def sync_metadata(self, request):
+        from config.metadata_sync import metadata_delta
+        return metadata_delta(request, self.get_serializer(self.get_queryset(), many=True).data)
+
     def get_queryset(self):
         return ChatRoom.objects.filter(members=self.request.user).prefetch_related(
             Prefetch("members", queryset=User.objects.select_related("profile", "presence")),
@@ -246,6 +251,28 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ack_message_delivery(request):
+    return _ack_message_delivery(request)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ack_message_delivery_batch(request):
+    from types import SimpleNamespace
+    receipts = request.data.get("receipts")
+    if not isinstance(receipts, list) or not 1 <= len(receipts) <= 100 or not all(isinstance(item, dict) for item in receipts):
+        return Response({"error": "Provide 1 to 100 receipts"}, status=400)
+    results = []
+    for receipt in receipts:
+        response = _ack_message_delivery(SimpleNamespace(user=request.user, data=receipt))
+        results.append({
+            "message_id": receipt.get("message_id"),
+            "http_status": response.status_code,
+            "status": response.data.get("status"),
+        })
+    return Response({"results": results})
+
+
+def _ack_message_delivery(request):
     """
     Confirm that a message was received and persisted to device storage.
     
@@ -267,9 +294,16 @@ def ack_message_delivery(request):
     }
     """
     try:
-        message_id = request.data.get("message_id", "").strip()
+        message_id = request.data.get("message_id", "")
         sender_id = request.data.get("sender_id")
-        room_id = request.data.get("room_id", "").strip()
+        room_id = request.data.get("room_id", "")
+        from uuid import UUID
+        try:
+            if not isinstance(message_id, str) or not isinstance(room_id, str):
+                raise ValueError("Invalid receipt identifiers")
+            message_id, room_id = message_id.strip(), str(UUID(room_id.strip()))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"status": "invalid_request", "error": "Invalid receipt identifiers"}, status=400)
         delivered_at_str = request.data.get("delivered_at")
         
         if not message_id or not sender_id or not room_id:
@@ -374,6 +408,7 @@ def ack_message_delivery(request):
                         "by_user_id": request.user.id,
                         "by_username": request.user.username,
                         "room_id": str(room_id),
+                        "delivered_at": delivery.delivered_at.isoformat() if delivery.delivered_at else None,
                     },
                 },
             )
@@ -697,6 +732,7 @@ def send_message(request):
         {
             "status": "relayed",
             "message_id": message_id,
+            "recipient_ids": eligible_recipient_ids,
             "correlation_id": f"msg:{message_id}",
         },
         status=status.HTTP_200_OK,

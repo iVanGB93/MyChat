@@ -9,7 +9,7 @@ from django.http import JsonResponse
 from django.urls import include, path
 
 from . import views
-from users.views import serve_blob
+from users.views import serve_blob, serve_profile_object
 
 
 def health_check(request):
@@ -23,6 +23,7 @@ urlpatterns = [
     path("api/app/version/", views.app_version_view, name="app-version"),
     # DB-backed media (avatars, etc.) — survives ephemeral filesystems.
     path("media-db/<path:name>", serve_blob, name="media-db"),
+    path("media-profile/<path:name>", serve_profile_object, name="media-profile"),
     # Web interface (templates)
     path("", views.landing_view, name="home"),
     path("login/", views.login_view, name="login"),

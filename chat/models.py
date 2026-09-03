@@ -160,6 +160,8 @@ class MessageDelivery(models.Model):
         default=ROUTE_UNKNOWN,
     )
     delivered_at = models.DateTimeField(null=True, blank=True)
+    # Set only after the sender confirms durable local storage of this receipt.
+    sender_confirmed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     push_sent_at = models.DateTimeField(null=True, blank=True)
     last_push_attempt_at = models.DateTimeField(null=True, blank=True)
     push_attempt_count = models.PositiveSmallIntegerField(default=0)
