@@ -5,7 +5,7 @@ from django.test import TestCase
 
 from users.models import UserDevice
 
-from .push import send_call_push, send_message_push
+from .push import send_call_push, send_message_push, send_message_recovery_hint
 
 
 User = get_user_model()
@@ -75,3 +75,19 @@ class ActionableFcmNotificationTests(TestCase):
         self.assertEqual(kwargs["data"]["type"], "incoming_call")
         self.assertEqual(kwargs["data"]["callId"], "call-1")
         send_expo.assert_not_called()
+
+    @patch("chat.push._send_fcm_data", return_value=True)
+    def test_stale_delivery_recovery_is_silent_and_keeps_message_identity(self, send_fcm):
+        sent = send_message_recovery_hint(
+            recipient_ids=[self.recipient.id],
+            room_id="room-1",
+            message_id="message-1",
+            sender_id=self.sender.id,
+        )
+
+        self.assertTrue(sent)
+        kwargs = send_fcm.call_args.kwargs
+        self.assertNotIn("title", kwargs)
+        self.assertNotIn("body", kwargs)
+        self.assertEqual(kwargs["data"]["type"], "message_recovery_hint")
+        self.assertEqual(kwargs["data"]["message_id"], "message-1")

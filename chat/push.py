@@ -524,6 +524,42 @@ def send_message_push(
     return sent
 
 
+def send_message_recovery_hint(
+    recipient_ids: list[int],
+    room_id: str,
+    message_id: str,
+    sender_id: int,
+) -> bool:
+    """Wake modern Android clients without displaying an old generic alert.
+
+    The server intentionally does not retain message content, so a maintenance
+    sweep cannot recreate the real notification. This data-only hint wakes the
+    client's Axion recovery path instead. Expo fallback tokens are deliberately
+    excluded because Expo's legacy notification request is user-visible.
+    """
+    rows = UserDevice.objects.filter(
+        user_id__in=recipient_ids,
+        is_active=True,
+        user__notif_messages_enabled=True,
+    ).exclude(fcm_token="").values_list("fcm_token", flat=True)
+    fcm_tokens = list(dict.fromkeys(token for token in rows if token))
+    if not fcm_tokens:
+        return False
+    return _send_fcm_data(
+        fcm_tokens=fcm_tokens,
+        data={
+            "type": "message_recovery_hint",
+            "roomId": room_id,
+            "room_id": room_id,
+            "messageId": message_id,
+            "message_id": message_id,
+            "senderId": str(sender_id),
+            "sender_id": str(sender_id),
+        },
+        channel_id="messages",
+    )
+
+
 def send_call_push(
     callee_id: int,
     caller_name: str,

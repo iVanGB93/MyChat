@@ -315,7 +315,7 @@ class MessageDeliveryMaintenanceTests(TransactionTestCase):
         MESSAGE_DELIVERY_PUSH_RETRY_SECONDS=300,
         MESSAGE_DELIVERY_PUSH_MAX_ATTEMPTS=3,
     )
-    @patch("chat.tasks.send_message_push", return_value=False)
+    @patch("chat.tasks.send_message_recovery_hint", return_value=False)
     def test_failed_push_is_backed_off_instead_of_retried_each_sweep(self, send_push):
         row = self._delivery()
 

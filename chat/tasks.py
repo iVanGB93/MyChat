@@ -8,18 +8,19 @@ from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from .models import MessageDelivery, ChatRoom
-from .push import send_message_push
+from .models import MessageDelivery
+from .push import send_message_recovery_hint
 
 logger = logging.getLogger(__name__)
 
 
 @shared_task
 def sweep_stale_message_deliveries() -> dict:
-    """Push fallback for deliveries still pending after ack timeout.
+    """Silent recovery wake-up for deliveries pending after the ACK timeout.
 
-    This task makes delivery fallback resilient to worker/app restarts by
-    periodically checking pending per-message delivery metadata.
+    The backend has no message content to recreate a real alert. It therefore
+    wakes Axion recovery without presenting a generic notification that could
+    duplicate an old message.
     """
     timeout_s = int(getattr(settings, "MESSAGE_ACK_TIMEOUT_SECONDS", 8))
     retry_s = int(getattr(settings, "MESSAGE_DELIVERY_PUSH_RETRY_SECONDS", 300))
@@ -36,7 +37,6 @@ def sweep_stale_message_deliveries() -> dict:
             push_attempt_count__lt=max_attempts,
         )
         .filter(Q(last_push_attempt_at__isnull=True) | Q(last_push_attempt_at__lte=retry_cutoff))
-        .select_related("sender", "room")
         .order_by("room_id", "message_id", "sender_id", "recipient_id")
     )
 
@@ -58,8 +58,8 @@ def sweep_stale_message_deliveries() -> dict:
     for (room_id_str, message_id, sender_id), deliveries in grouped.items():
         delivery_ids = [d.id for d in deliveries]
         # Reserve the retry before contacting FCM. This shares the same durable
-        # attempt state as the realtime consumer, so duplicate Axion frames and
-        # overlapping Beat sweeps cannot repeatedly notify the same recipient.
+        # attempt state as the realtime consumer, so overlapping Beat sweeps
+        # cannot repeatedly wake the same recipient.
         with transaction.atomic():
             reserved = MessageDelivery.objects.select_for_update().filter(
                 id__in=delivery_ids,
@@ -81,27 +81,17 @@ def sweep_stale_message_deliveries() -> dict:
         recipient_ids = [
             d.recipient_id for d in deliveries if d.id in reserved_ids
         ]
-        sender_name = deliveries[0].sender.username
-        room = deliveries[0].room
-        if room.room_type == ChatRoom.DIRECT and not room.name:
-            room_name = sender_name
-        else:
-            room_name = room.name or room_id_str
-
-        sent = send_message_push(
+        sent = send_message_recovery_hint(
             recipient_ids=recipient_ids,
-            sender_name=sender_name,
-            content="New message waiting",
             room_id=room_id_str,
-            room_name=room_name,
-            correlation_id=f"msg:{message_id}",
-            route_reason="push_stale_sweep",
+            message_id=message_id,
+            sender_id=sender_id,
         )
 
         if not sent:
             skipped += len(reserved_ids)
             logger.warning(
-                "[DeliverySweep] push unavailable room=%s sender=%s message_id=%s recipients=%d; retry is backed off",
+                "[DeliverySweep] recovery hint unavailable room=%s sender=%s message_id=%s recipients=%d; retry is backed off",
                 room_id_str,
                 sender_id,
                 message_id,
@@ -115,7 +105,7 @@ def sweep_stale_message_deliveries() -> dict:
         ).update(push_sent_at=now)
         marked += updated
         logger.info(
-            "[DeliverySweep] fallback push sent room=%s sender=%s message_id=%s recipients=%d marked=%d",
+            "[DeliverySweep] silent recovery hint sent room=%s sender=%s message_id=%s recipients=%d marked=%d",
             room_id_str,
             sender_id,
             message_id,
