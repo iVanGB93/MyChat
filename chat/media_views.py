@@ -493,6 +493,22 @@ def confirm_media_downloaded(request, media_id):
         installation_id=installation_id,
     )
 
+    # A verified on-device download is also proof of message delivery. Older
+    # clients send these two confirmations separately; repair the delivery
+    # receipt here if the first request was interrupted or lost.
+    if blob.message_id and request.user.id != blob.owner_id:
+        from types import SimpleNamespace
+        from .views import _ack_message_delivery
+
+        receipt = _ack_message_delivery(SimpleNamespace(user=request.user, data={
+            "message_id": blob.message_id,
+            "sender_id": blob.owner_id,
+            "room_id": str(blob.room_id),
+        }))
+        if receipt.status_code >= 500:
+            # Keep the client's durable confirmation queued for another try.
+            return Response({"ok": False, "error": "receipt_unavailable"}, status=503)
+
     all_confirmed = _recompute_all_confirmed(blob)
     return Response({"ok": True, "all_confirmed": all_confirmed})
 

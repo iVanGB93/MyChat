@@ -467,6 +467,30 @@ def message_delivery_status(request):
     # Cap batch size to avoid abuse / oversized queries.
     message_ids = [str(m) for m in message_ids[:500]]
 
+    # Older app versions may confirm verified media storage even when their
+    # separate message ACK was lost. Recover only exact sender/room/recipient
+    # matches backed by that stored confirmation, never a mere download GET.
+    from types import SimpleNamespace
+    from .models import MediaDownload
+    pending_rows = set(MessageDelivery.objects.filter(
+        sender_id=request.user.id, message_id__in=message_ids,
+        status=MessageDelivery.STATUS_PENDING,
+    ).values_list("message_id", "room_id", "recipient_id"))
+    if pending_rows:
+        confirmations = MediaDownload.objects.filter(
+            media__owner_id=request.user.id,
+            media__message_id__in=[row[0] for row in pending_rows],
+        ).select_related("media", "recipient")
+        repaired = set()
+        for confirmation in confirmations:
+            key = (confirmation.media.message_id, confirmation.media.room_id, confirmation.recipient_id)
+            if key not in pending_rows or key in repaired:
+                continue
+            _ack_message_delivery(SimpleNamespace(user=confirmation.recipient, data={
+                "message_id": key[0], "room_id": str(key[1]), "sender_id": request.user.id,
+            }))
+            repaired.add(key)
+
     rows = MessageDelivery.objects.filter(
         sender_id=request.user.id,
         message_id__in=message_ids,
