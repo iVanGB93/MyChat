@@ -9,6 +9,7 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics, status
@@ -19,7 +20,7 @@ from .models import CallLog
 from .serializers import CallLogSerializer
 from chat.push import send_call_push
 from chat.consumers import decide_call_notification_route, get_user_notification_channels, get_user_routing_state, record_notification_decision
-from users.models import UserDevice
+from users.models import UserDevice, BlockedUser
 
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,11 @@ class InitiateCallView(APIView):
             return Response({"error": "call_type must be voice or video"}, status=status.HTTP_400_BAD_REQUEST)
         if not User.objects.filter(id=callee_id, is_active=True).exists():
             return Response({"error": "Callee not found"}, status=status.HTTP_404_NOT_FOUND)
+        if BlockedUser.objects.filter(
+            Q(owner_id=request.user.id, blocked_id=callee_id)
+            | Q(owner_id=callee_id, blocked_id=request.user.id)
+        ).exists():
+            return Response({"error": "Calling this user is not available"}, status=status.HTTP_403_FORBIDDEN)
 
         room_name = f"call_{uuid.uuid4().hex[:12]}"
 
@@ -290,9 +296,10 @@ class InitiateCallView(APIView):
 class JoinCallView(APIView):
     """Callee accepts the call."""
 
+    @transaction.atomic
     def post(self, request, call_id):
         try:
-            call = CallLog.objects.get(id=call_id, callee=request.user)
+            call = CallLog.objects.select_for_update().get(id=call_id, callee=request.user)
         except CallLog.DoesNotExist:
             return Response(
                 {"error": "Call not found"},
@@ -356,9 +363,10 @@ class JoinCallView(APIView):
 class EndCallView(APIView):
     """End / reject an active call."""
 
+    @transaction.atomic
     def post(self, request, call_id):
         try:
-            call = CallLog.objects.get(
+            call = CallLog.objects.select_for_update().get(
                 id=call_id,
             )
         except CallLog.DoesNotExist:
