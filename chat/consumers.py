@@ -20,6 +20,7 @@ from .relay_service import (
     build_axion_relay_plan,
     record_message_deliveries,
     record_pending_deliveries,
+    pending_recovery_routes,
 )
 from .push import send_message_push
 from users.models import BlockedUser, Contact, UserDevice, UserPresence, UserPresenceSession
@@ -1146,12 +1147,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_pending_senders_for_room(self) -> list[int]:
-        return list(
-            PendingDelivery.objects.filter(
-                room_id=self.room_id,
-                to_user=self.user,
-            ).values_list("from_user_id", flat=True)
-        )
+        return [r["from_user_id"] for r in pending_recovery_routes(self.user, self.room_id)]
 
     @database_sync_to_async
     def get_room_info(self) -> dict:
@@ -2347,19 +2343,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_pending_deliveries(self) -> list[dict]:
-        rows = PendingDelivery.objects.filter(
-            to_user=self.user,
-        ).select_related("from_user").values(
-            "from_user__id", "from_user__username", "room_id"
-        )
-        return [
-            {
-                "from_user_id": r["from_user__id"],
-                "from_username": r["from_user__username"],
-                "room_id": str(r["room_id"]),
-            }
-            for r in rows
-        ]
+        return pending_recovery_routes(self.user)
 
     @database_sync_to_async
     def delete_pending_delivery_notif(self, from_user_id: int, room_id: str) -> None:
@@ -2504,12 +2488,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     @database_sync_to_async
     def get_pending_senders_for_room_notif(self, room_id: str) -> list[int]:
-        if not ChatRoom.objects.filter(id=room_id, members=self.user).exists():
-            return []
-        return list(
-            PendingDelivery.objects.filter(room_id=room_id, to_user=self.user)
-            .values_list("from_user_id", flat=True)
-        )
+        return [r["from_user_id"] for r in pending_recovery_routes(self.user, room_id)]
 
     async def push_axion_fallback_after_timeout(
         self,

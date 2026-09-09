@@ -5,11 +5,43 @@ module owns their common membership, recipient and durable delivery work.
 """
 
 from dataclasses import dataclass
+from django.db.models import F
 
 from users.models import BlockedUser, UserPresence
 from users.presence import notification_presence_is_stale
 
 from .models import ChatRoom, MessageDelivery, PendingDelivery
+
+
+def pending_recovery_routes(recipient, room_id=None) -> list[dict]:
+    """Reconnect hints from durable receipts, including brief socket outages.
+
+    Keep legacy room hints for older clients, deduplicated with message metadata.
+    Neither transport eligibility nor offline-email eligibility proves delivery.
+    """
+    blocked = BlockedUser.objects.filter(owner=recipient).values("blocked_id")
+    deliveries = MessageDelivery.objects.filter(
+        recipient=recipient, status=MessageDelivery.STATUS_PENDING,
+        room__members=recipient,
+    ).filter(room__members=F("sender_id")).exclude(sender_id__in=blocked)
+    legacy = PendingDelivery.objects.filter(
+        to_user=recipient, room__members=recipient,
+    ).filter(room__members=F("from_user_id")).exclude(from_user_id__in=blocked)
+    if room_id is not None:
+        deliveries = deliveries.filter(room_id=room_id)
+        legacy = legacy.filter(room_id=room_id)
+    routes = {}
+    for rows in (
+        deliveries.values_list("sender_id", "sender__username", "room_id").distinct(),
+        legacy.values_list("from_user_id", "from_user__username", "room_id").distinct(),
+    ):
+        for sender_id, username, target_room in rows:
+            routes[(sender_id, str(target_room))] = {
+                "from_user_id": sender_id,
+                "from_username": username,
+                "room_id": str(target_room),
+            }
+    return list(routes.values())
 
 
 @dataclass(frozen=True)
