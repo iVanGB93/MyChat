@@ -1,8 +1,30 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
+import uuid
 
 from .db_storage import db_storage
+
+
+class SignInChallenge(models.Model):
+    """Single-use email proof; shared row serializes sends and guesses per email."""
+    email = models.EmailField(unique=True)
+    challenge_id = models.UUIDField(default=uuid.uuid4, unique=True)
+    code_hash = models.CharField(max_length=255, blank=True)
+    expires_at = models.DateTimeField(default=timezone.now)
+    last_sent_at = models.DateTimeField(default=timezone.now)
+    window_started_at = models.DateTimeField(default=timezone.now)
+    send_count = models.PositiveSmallIntegerField(default=0)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    consumed = models.BooleanField(default=True)
+    google_subject = models.CharField(max_length=255, blank=True)
+
+
+class GoogleIdentity(models.Model):
+    # Google subject, not email, is the permanent provider identity.
+    subject = models.CharField(max_length=255, unique=True)
+    user = models.OneToOneField('User', on_delete=models.CASCADE, related_name='google_identity')
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 def _generate_user_tag() -> str:

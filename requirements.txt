@@ -30,6 +30,8 @@ python-dotenv>=1.0
 Pillow>=10.0
 gunicorn>=21.0
 requests>=2.31
+google-auth[requests]>=2.0,<3
+cachecontrol>=0.14,<1
 boto3>=1.35,<2
 
 # Push (FCM v1 data messages for WhatsApp-style background delivery)

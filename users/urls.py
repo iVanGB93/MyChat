@@ -4,6 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import views
 from .auth import AxonicTokenObtainPairView
+from .easy_auth import EmailSignInStart, EmailSignInVerify, GoogleSignIn
 
 router = DefaultRouter()
 router.register(r"contacts", views.ContactViewSet, basename="contact")
@@ -11,6 +12,9 @@ router.register(r"blocked", views.BlockedUserViewSet, basename="blocked")
 
 urlpatterns = [
     # Auth
+    path("signin/email/", EmailSignInStart.as_view(), name="email-signin"),
+    path("signin/verify/", EmailSignInVerify.as_view(), name="email-signin-verify"),
+    path("signin/google/", GoogleSignIn.as_view(), name="google-signin"),
     path("register/", views.RegisterView.as_view(), name="register"),
     # Email-verification registration flow
     path("register/request/", views.RegisterRequestView.as_view(), name="register-request"),

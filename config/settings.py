@@ -15,6 +15,12 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Public OAuth client ID (type Web), never the client secret.
+GOOGLE_SIGNIN_WEB_CLIENT_ID = os.getenv(
+    "GOOGLE_SIGNIN_WEB_CLIENT_ID",
+    "515455178402-2p2uhhhdei7dfbgppfuphb6cg6qgadj2.apps.googleusercontent.com",
+).strip()
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
@@ -166,6 +172,8 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": (),
     "DEFAULT_THROTTLE_RATES": {
         "user_search": "30/min",
+        "easy_auth": "20/hour",
+        "easy_auth_verify": "60/hour",
         "register_request": "5/hour",
         "register_resend": "5/hour",
         "register_verify": "10/hour",
@@ -313,6 +321,10 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup-expired-media": {
         "task": "chat.tasks.cleanup_expired_media",
         "schedule": MEDIA_CLEANUP_INTERVAL_SECONDS,
+    },
+    "cleanup-signin-challenges": {
+        "task": "users.tasks.cleanup_signin_challenges",
+        "schedule": 86400,
     },
     "cleanup-message-delivery-metadata": {
         "task": "chat.tasks.cleanup_message_delivery_metadata",
