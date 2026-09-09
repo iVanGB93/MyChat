@@ -4,6 +4,7 @@ import hmac
 import logging
 import time
 import uuid
+from datetime import timedelta
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -151,13 +152,29 @@ class InitiateCallView(APIView):
 
         room_name = f"call_{uuid.uuid4().hex[:12]}"
 
-        call = CallLog.objects.create(
-            caller=request.user,
-            callee_id=callee_id,
-            call_type=call_type,
-            room_name=room_name,
-            status=CallLog.RINGING,
-        )
+        # Serialize starts for either participant (also covers crossed calls).
+        # Commit before notification delivery: slow push providers must not hold locks.
+        with transaction.atomic():
+            list(User.objects.select_for_update().filter(
+                id__in=[request.user.id, callee_id],
+            ).order_by('id').values_list('id', flat=True))
+            recent = timezone.now() - timedelta(seconds=90)
+            active = CallLog.objects.filter(
+                Q(caller_id__in=[request.user.id, callee_id])
+                | Q(callee_id__in=[request.user.id, callee_id]),
+            ).filter(
+                Q(status=CallLog.ONGOING)
+                | Q(status__in=[CallLog.INITIATED, CallLog.RINGING], started_at__gte=recent),
+            ).exists()
+            if active:
+                return Response({'error': 'A call is already in progress. Wait for it to finish before starting another.'}, status=status.HTTP_409_CONFLICT)
+            call = CallLog.objects.create(
+                caller=request.user,
+                callee_id=callee_id,
+                call_type=call_type,
+                room_name=room_name,
+                status=CallLog.RINGING,
+            )
 
         # Notify callee via WebSocket when at least one notification channel exists.
         # If WS is closed/stale, push is still sent below as the authoritative surface.
