@@ -2,6 +2,22 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 
 
+class PrivacyPageTests(TestCase):
+    def test_privacy_is_public_and_contains_deletion_contact(self):
+        response = self.client.get(reverse("privacy"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "privacy.html")
+        self.assertContains(response, "Privacy policy")
+        self.assertContains(response, 'id="delete-account"')
+        self.assertContains(response, "mailto:ivanguachbeltran@gmail.com")
+        self.assertNotIn("Set-Cookie", response.headers)
+
+    def test_landing_links_to_privacy_and_deletion(self):
+        response = self.client.get(reverse("home"))
+        self.assertContains(response, 'href="/privacy/"')
+        self.assertContains(response, 'href="/privacy/#delete-account"')
+
+
 class AppVersionViewTests(TestCase):
     @override_settings(
         APP_LATEST_VERSION="1.0.26",

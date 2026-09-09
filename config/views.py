@@ -56,6 +56,11 @@ def app_version_view(request):
     })
 
 
+def privacy_view(request):
+    """Public, login-free privacy and account-deletion information."""
+    return render(request, "privacy.html")
+
+
 def login_view(request):
     return render(request, "login.html")
 

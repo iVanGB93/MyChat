@@ -26,6 +26,7 @@ urlpatterns = [
     path("media-profile/<path:name>", serve_profile_object, name="media-profile"),
     # Web interface (templates)
     path("", views.landing_view, name="home"),
+    path("privacy/", views.privacy_view, name="privacy"),
     path("login/", views.login_view, name="login"),
     path("register/", views.register_view, name="register"),
     path("add/<str:user_tag>/", views.invite_tag_view, name="invite-tag"),
