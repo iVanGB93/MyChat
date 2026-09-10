@@ -14,6 +14,20 @@ User = get_user_model()
 class ActionableFcmNotificationTests(TestCase):
     """Raw Android FCM must stay data-only so Notifee owns the UI/actions."""
 
+    @patch("chat.push._send_expo_push")
+    @patch("chat.push._send_fcm_data", return_value=True)
+    def test_sticker_body_hides_marker_but_content_is_preserved(self, send_fcm, send_expo):
+        for content, expected, kind in [
+            ("🩵 Love it [axonic-sticker:v1:love]", "🩵 Love it", "text"),
+            ("Sticker [axonic-sticker:import:v1]", "Sticker", "image"),
+        ]:
+            with self.subTest(content=content):
+                send_message_push(recipient_ids=[self.recipient.id], sender_name=self.sender.username,
+                                  sender_id=self.sender.id, content=content, room_id="sticker-room",
+                                  room_name=self.sender.username, message_id="sticker-message", message_type=kind)
+                self.assertEqual(send_fcm.call_args.kwargs["data"]["body"], expected)
+                self.assertEqual(send_fcm.call_args.kwargs["data"]["content"], content)
+
     def setUp(self):
         self.sender = User.objects.create_user(
             username="push-sender",

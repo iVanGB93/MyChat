@@ -8,6 +8,7 @@ API docs: https://docs.expo.dev/push-notifications/sending-notifications/
 """
 
 import logging
+import re
 from typing import Optional
 
 import requests
@@ -23,6 +24,16 @@ EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 _fcm_initialized = False
 _fcm_app = None
+
+
+def _message_preview(content: str) -> str:
+    """Hide sticker transport markers in notification text, not payload content."""
+    if content.endswith("[axonic-sticker:import:v1]"):
+        return "Sticker"
+    match = re.fullmatch(r"(.*?)\s*\[axonic-sticker:v1:[a-z0-9_-]+\]", content, re.DOTALL)
+    if match:
+        return match.group(1).strip() or "Sticker"
+    return content
 
 
 def _get_fcm_app():
@@ -418,7 +429,7 @@ def send_message_push(
     # type-aware placeholder ("📷 Photo" / "🎤 Voice message") instead of a
     # generic "New message".
     if content:
-        display_body = content[:200]
+        display_body = _message_preview(content)[:200]
     elif message_type in ("image", "photo"):
         display_body = "📷 Photo"
     elif message_type in ("voice", "audio"):
