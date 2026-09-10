@@ -2429,6 +2429,9 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def queue_offline_email_nudges(self, room_id: str, recipient_ids: list[int]) -> None:
         """Reserve one cooldown slot per recipient, then send outside Axion's hot path."""
+        # Give push delivery and reconnect receipts time to arrive. Re-check
+        # current delivery/presence below instead of emailing from a stale plan.
+        await asyncio.sleep(30)
         recipients = await self.reserve_offline_email_nudges(room_id, recipient_ids)
         for recipient in recipients:
             # SMTP/HTTP email providers are blocking. Running them on Daphne's
@@ -2452,6 +2455,18 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         recipients: list[dict] = []
         with transaction.atomic():
             for recipient in User.objects.select_for_update().filter(id__in=recipient_ids):
+                if not recipient.notif_offline_email_enabled or not recipient.notif_messages_enabled:
+                    continue
+                presence = UserPresence.objects.filter(user_id=recipient.id).first()
+                if (presence and presence.notification_socket_connected
+                        and presence.app_state == UserPresence.APP_STATE_ACTIVE
+                        and not notification_presence_is_stale(presence)):
+                    continue
+                if not MessageDelivery.objects.filter(
+                    room_id=room_id, sender_id=self.user.id,
+                    recipient_id=recipient.id, status=MessageDelivery.STATUS_PENDING,
+                ).exists():
+                    continue
                 # Preserve the request-safety rule while keeping this check
                 # out of Axion's live relay path.
                 if not Contact.objects.filter(

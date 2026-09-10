@@ -796,9 +796,6 @@
     // =========================================================================
     let activeRoomId = null;
     let roomData = null;
-    let chatWs = null;
-    let chatWsAuthenticated = false;
-    let chatWsReconnectTimer = null;
     let typingStopTimer = null;
 
     async function openDirectChat(userId) {
@@ -815,9 +812,6 @@
     async function openRoom(roomId) {
         if (activeRoomId === roomId) return;
 
-        // Disconnect previous WS
-        if (chatWs) { chatWs.onclose = null; chatWs.close(); chatWs = null; }
-        clearTimeout(chatWsReconnectTimer);
 
         activeRoomId = roomId;
 
@@ -972,11 +966,12 @@
 
     // Flush undelivered outbox messages for a recipient who just connected
     async function flushOutboxForRecipient(roomId, recipientId) {
-        if (!chatWs || chatWs.readyState !== WebSocket.OPEN || !chatWsAuthenticated || activeRoomId !== roomId) return;
+        if (!notifWs || notifWs.readyState !== WebSocket.OPEN || !notifWsAuthenticated) return;
         try {
             const msgs = await idbGetPendingOutbox(roomId, recipientId);
             for (const msg of msgs) {
-                chatWs.send(JSON.stringify({
+                notifWs.send(JSON.stringify({
+                    type: 'send_message', room_id: String(roomId), target_recipient_id: recipientId,
                     id: msg.id,
                     message: msg.content,
                     message_type: msg.type,
@@ -1018,7 +1013,7 @@
                 ${senderLabel}
                 <div class="message-content">${escapeHtml(text)}</div>
                 ${reactions ? `<div class="message-reactions">${reactions}</div>` : ''}
-                <div class="message-time">${time}</div>
+                <div class="message-time">${time}${isMine ? ` · ${message.is_read || message.status === 'read' ? 'Read' : message.status === 'delivered' ? 'Delivered' : 'Pending'}` : ''}</div>
             </div>
         `;
     }
@@ -1037,6 +1032,7 @@
             const message = await idbGetMessage(update.message_id);
             if (!message) continue;
             Object.assign(message, update.changes || {});
+            if (message.is_read) message.status = 'read';
             await idbSaveMessage(message);
             const oldEl = document.querySelector(`[data-msg-id="${CSS.escape(update.message_id)}"]`);
             if (oldEl) oldEl.outerHTML = renderMessage(message);
@@ -1098,109 +1094,15 @@
     // CHAT WEBSOCKET
     // =========================================================================
     function connectChatWS() {
-        clearTimeout(chatWsReconnectTimer);
-        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-        chatWsAuthenticated = false;
-        // Keep the JWT out of URLs/logs. This is the same post-connect handshake
-        // used by the mobile client and supported by ChatConsumer.
-        chatWs = new WebSocket(`${wsProto}://${location.host}/ws/chat/${activeRoomId}/`);
-
-        chatWs.onopen = () => {
-            document.getElementById('ws-status').innerHTML =
-                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:4px;"></span>Connecting…';
-            chatWs.send(JSON.stringify({ type: 'auth', token: currentToken }));
-        };
-
-        chatWs.onmessage = async (e) => {
-            try {
-                const msg = JSON.parse(e.data);
-                const msgType = msg.type || '';
-
-                if (msgType === 'auth_ok') {
-                    chatWsAuthenticated = true;
-                    document.getElementById('ws-status').innerHTML =
-                        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:4px;"></span>Online';
-                    chatWs.send(JSON.stringify({ type: 'ready_to_receive' }));
-                    return;
-                }
-                if (msgType === 'auth_failed') { logout(); return; }
-                if (msgType === 'message_server_ack') {
-                    console.log('[CHAT WS] server_ack', msg.message_id);
-                    return;
-                }
-                if (msgType === 'pong') return;
-                if (msgType === 'messages_read') {
-                    await applyMessageUpdates((msg.message_ids || []).map((message_id) => ({ message_id, changes: { status: 'read', is_read: true } })));
-                    return;
-                }
-                if (msgType === 'message_update') {
-                    await applyMessageUpdates(msg.updates);
-                    if (msg.updates?.length && msg.sender_id) {
-                        chatWs.send(JSON.stringify({ type: 'message_update_ack', room_id: activeRoomId, sender_id: msg.sender_id, update_ids: msg.updates.map((u) => u.id).filter(Boolean) }));
-                    }
-                    return;
-                }
-                if (msgType === 'typing') { setTypingIndicator(msg.sender, msg.is_typing); return; }
-
-                const sender = msg.sender || msg.sender_username;
-                const msgId = msg.id;
-                if (!msgId) return;
-
-                const exists = await idbMessageExists(msgId);
-                if (!exists) {
-                    await idbSaveMessage({
-                        id: msgId,
-                        room_id: activeRoomId,
-                        sender_id: msg.sender_id,
-                        sender_name: sender,
-                        content: msg.content || msg.message || '',
-                        type: msg.message_type || 'text',
-                        created_at: msg.created_at || new Date().toISOString(),
-                        is_mine: msg.sender_id === currentUserId,
-                        reactions: msg.reactions || {},
-                        is_deleted: Boolean(msg.is_deleted),
-                    });
-                    // Only render messages from others (own messages rendered on send)
-                    if (msg.sender_id !== currentUserId) {
-                        const emptyEl = document.getElementById('empty-chat');
-                        if (emptyEl) emptyEl.remove();
-                        const container = document.getElementById('messages');
-                        container.insertAdjacentHTML('beforeend', renderMessage(msg));
-                        scrollToBottom();
-                        soundMessageIn();
-                    }
-                }
-                // Ack messages from other users so PendingDelivery is cleared
-                if (msg.sender_id !== currentUserId && chatWs.readyState === WebSocket.OPEN && chatWsAuthenticated) {
-                    chatWs.send(JSON.stringify({
-                        type: 'message_ack',
-                        message_id: msgId,
-                        sender_id: msg.sender_id,
-                    }));
-                }
-            } catch (err) {
-                console.error('[CHAT WS] render error:', err);
-            }
-        };
-
-        chatWs.onclose = async () => {
-            chatWsAuthenticated = false;
-            document.getElementById('ws-status').innerHTML =
-                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:4px;"></span>Offline';
-            await refreshToken();
-            chatWsReconnectTimer = setTimeout(() => {
-                if (activeRoomId) connectChatWS();
-            }, 3000);
-        };
-
-        chatWs.onerror = () => chatWs.close();
+        recoveryRooms.add(String(activeRoomId));
+        refreshWebPresence();
     }
 
     async function sendMessage() {
         const input = document.getElementById('msg-input');
         const text = input.value.trim();
         if (!text) return;
-        if (!chatWs || chatWs.readyState !== WebSocket.OPEN || !chatWsAuthenticated) return;
+        if (!notifWs || notifWs.readyState !== WebSocket.OPEN || !notifWsAuthenticated) return;
 
         const msgId = crypto.randomUUID();
         const createdAt = new Date().toISOString();
@@ -1213,11 +1115,13 @@
             sender_name: username,
             content: text,
             type: 'text',
+            room_type: roomData?.room_type,
             created_at: createdAt,
             is_mine: true,
         });
 
-        chatWs.send(JSON.stringify({
+        notifWs.send(JSON.stringify({
+            type: 'send_message', room_id: String(activeRoomId),
             id: msgId,
             message: text,
             message_type: 'text',
@@ -1240,12 +1144,13 @@
         if (e.key === 'Enter') sendMessage();
     });
     document.getElementById('msg-input').addEventListener('input', () => {
-        if (!chatWsAuthenticated || chatWs?.readyState !== WebSocket.OPEN) return;
-        chatWs.send(JSON.stringify({ type: 'typing', is_typing: true }));
+        if (!notifWsAuthenticated || notifWs?.readyState !== WebSocket.OPEN) return;
+        const typingRoomId = activeRoomId;
+        notifWs.send(JSON.stringify({ type: 'typing', room_id: typingRoomId, is_typing: true }));
         clearTimeout(typingStopTimer);
         typingStopTimer = setTimeout(() => {
-            if (chatWsAuthenticated && chatWs?.readyState === WebSocket.OPEN) {
-                chatWs.send(JSON.stringify({ type: 'typing', is_typing: false }));
+            if (notifWsAuthenticated && notifWs?.readyState === WebSocket.OPEN) {
+                notifWs.send(JSON.stringify({ type: 'typing', room_id: typingRoomId, is_typing: false }));
             }
         }, 900);
     });
@@ -1265,6 +1170,27 @@
     // =========================================================================
     let notifWs = null;
     let notifWsAuthenticated = false;
+    let axionHeartbeat = null;
+    let axionReconnect = null;
+    let axionLastSeen = 0;
+    const recoveryRooms = new Set();
+
+    function refreshWebPresence() {
+        document.getElementById('ws-status').textContent = notifWsAuthenticated ? 'Connected' : 'Reconnecting…';
+        if (!notifWsAuthenticated || notifWs?.readyState !== WebSocket.OPEN) return;
+        notifWs.send(JSON.stringify({ type: 'app_state', state: document.hidden ? 'background' : 'active' }));
+        notifWs.send(JSON.stringify({ type: 'ping' }));
+        if (!document.hidden) {
+            if (activeRoomId) recoveryRooms.add(String(activeRoomId));
+            for (const room_id of recoveryRooms) notifWs.send(JSON.stringify({ type: 'room_ready', room_id }));
+            recoveryRooms.clear();
+        }
+    }
+    document.addEventListener('visibilitychange', refreshWebPresence);
+    window.addEventListener('online', () => {
+        if (!notifWs || notifWs.readyState === WebSocket.CLOSED) connectNotifications();
+        else refreshWebPresence();
+    });
 
     // Call state
     let currentIncomingCall = null;
@@ -1293,6 +1219,9 @@
     ];
 
     function connectNotifications() {
+        if (notifWs && [WebSocket.OPEN, WebSocket.CONNECTING].includes(notifWs.readyState)) return;
+        clearTimeout(axionReconnect);
+        clearInterval(axionHeartbeat);
         const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
         notifWsAuthenticated = false;
         notifWs = new WebSocket(`${wsProto}://${location.host}/ws/notifications/`);
@@ -1303,13 +1232,19 @@
 
         notifWs.onmessage = async (e) => {
             const data = JSON.parse(e.data);
-            console.log('[NOTIF]', data);
+            axionLastSeen = Date.now();
 
             if (data.type === 'auth_ok') {
                 notifWsAuthenticated = true;
                 // Match the mobile presence contract so message routing can
                 // distinguish an actively viewed browser from a stale socket.
-                notifWs.send(JSON.stringify({ type: 'app_state', state: 'active' }));
+                refreshWebPresence();
+                axionHeartbeat = setInterval(() => {
+                    if (Date.now() - axionLastSeen > 60000) { notifWs.close(); return; }
+                    if (notifWsAuthenticated && notifWs.readyState === WebSocket.OPEN) {
+                        notifWs.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, 20000);
                 return;
             }
             if (data.type === 'auth_failed') { logout(); return; }
@@ -1317,9 +1252,11 @@
 
             // ---- top-level type messages (not event-based) ----
             if (data.type === 'pending_deliveries') {
-                // Pending rooms: messages will be delivered when user opens those rooms
-                // (ready_to_receive is sent on chatWs.onopen)
-                console.log('[NOTIF] pending deliveries for rooms:', (data.deliveries || []).map(d => d.room_id));
+                // Recover pending rooms over Axion even when not currently open.
+                for (const delivery of data.deliveries || []) {
+                    if (delivery.room_id) recoveryRooms.add(String(delivery.room_id));
+                }
+                refreshWebPresence();
                 return;
             }
             if (data.type === 'peer_sync_available') {
@@ -1328,6 +1265,17 @@
             }
 
             switch (data.event) {
+                case 'message_update':
+                    await applyMessageUpdates(data.updates);
+                    notifWs.send(JSON.stringify({ type: 'message_update_ack', room_id: data.room_id,
+                        sender_id: data.from_user_id || data.sender_id, update_ids: (data.updates || []).map(u => u.id).filter(Boolean) }));
+                    break;
+                case 'messages_read':
+                    await applyMessageUpdates((data.message_ids || []).map(message_id => ({ message_id, changes: { status: 'read', is_read: true } })));
+                    break;
+                case 'typing':
+                    if (String(data.room_id) === String(activeRoomId)) setTypingIndicator(data.sender, data.is_typing);
+                    break;
                 case 'incoming_call':
                     handleIncomingCall(data);
                     break;
@@ -1350,7 +1298,12 @@
                 case 'message_delivery_ack':
                     // Recipient stored our message
                     if (data.message_id && data.by_user_id) {
-                        idbMarkDelivered(data.message_id, data.by_user_id).catch(() => {});
+                        await idbMarkDelivered(data.message_id, data.by_user_id);
+                        const stored = await idbGetMessage(data.message_id);
+                        const isDirect = stored?.room_type === 'direct' || (String(stored?.room_id) === String(activeRoomId) && roomData?.room_type === 'direct');
+                        if (stored && !stored.is_read && isDirect) {
+                            await applyMessageUpdates([{ message_id: data.message_id, changes: { status: 'delivered' } }]);
+                        }
                     }
                     break;
                 case 'new_message':
@@ -1377,7 +1330,9 @@
 
         notifWs.onclose = () => {
             notifWsAuthenticated = false;
-            setTimeout(connectNotifications, 3000);
+            document.getElementById('ws-status').textContent = 'Reconnecting…';
+            clearInterval(axionHeartbeat);
+            axionReconnect = setTimeout(async () => { await refreshToken(); connectNotifications(); }, 3000);
         };
         notifWs.onerror = () => notifWs.close();
     }
