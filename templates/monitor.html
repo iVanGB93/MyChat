@@ -145,6 +145,35 @@
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
     .stat-card .value { font-size: 1.6rem; }
   }
+
+  /* Axonic operations: clear hierarchy, cyan accents, restrained status colors. */
+  body { background: #030b15; }
+  .monitor { max-width: 1320px; padding: 40px 24px 64px; --accent: #0e7490; --primary: #67d9ef; --surface: #0b1828; --surface2: #102337; --bg: #07111e; --border: #203449; --text-muted: #9aaec1; }
+  .eyebrow { color: var(--primary); font-size: .72rem; font-weight: 800; letter-spacing: .18em; margin-bottom: 12px; }
+  .monitor h1 { font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.045em; margin: 0 0 12px; }
+  .topbar { align-items: flex-start; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .refresh-info { padding: 14px 18px; border: 1px solid var(--border); border-radius: 16px; line-height: 1.8; min-width: 220px; }
+  #dataStatus { display: block; font-weight: 700; }
+  .stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }
+  .stat-card { text-align: left; border-radius: 18px; padding: 22px; background: var(--surface); }
+  .stat-card .value { font-size: 2rem; letter-spacing: -.045em; font-variant-numeric: tabular-nums; }
+  .stat-card .label { font-size: .73rem; line-height: 1.5; letter-spacing: .04em; margin-top: 12px; }
+  .section { border: 1px solid var(--border); background: var(--surface); padding: 24px; border-radius: 22px; margin-bottom: 20px; overflow-x: auto; }
+  .section-title { font-weight: 750; font-size: 1.12rem; margin-bottom: 18px; }
+  .section .stats-grid { margin-top: 12px; }
+  .section .stat-card { background: var(--bg); }
+  .badge { border-radius: 8px !important; font-variant-numeric: tabular-nums; }
+  .data-table th { font-size: .66rem; letter-spacing: .07em; white-space: nowrap; }
+  .data-table td { padding-top: 14px; padding-bottom: 14px; }
+  .empty { padding: 24px 12px; font-style: normal; text-align: center; }
+  #metricScope { font-size: .78rem; line-height: 1.6; margin: 24px 0 12px; }
+  .receipt-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 16px 20px; margin-bottom: 18px; border-left: 3px solid #22d3ee; background: var(--surface); border-radius: 0 14px 14px 0; }
+  .receipt-strip strong { font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+  .receipt-strip small { color: var(--text-muted); margin-left: auto; }
+  .clickable-user { border: 0; background: transparent; color: var(--primary); font: inherit; cursor: pointer; padding: 4px 0; text-decoration: underline; text-underline-offset: 4px; }
+  button:focus-visible { outline: 2px solid #22d3ee; outline-offset: 4px; }
+  @media (max-width: 700px) { .monitor { padding: 24px 12px; } .topbar { flex-direction: column; } .refresh-info { width: 100%; box-sizing: border-box; } .stats-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .section { padding: 16px; } .stat-card { padding: 16px; } .receipt-strip small { margin-left: 0; } }
+  @media (max-width: 380px) { .stats-grid { grid-template-columns: 1fr; } }
 </style>
 {% endblock %}
 
@@ -152,11 +181,11 @@
 <div class="monitor">
   <div class="topbar">
     <div>
-      <h1>Server Monitor</h1>
-      <div class="subtitle">Real-time server statistics — auto-refreshes every 3s</div>
+      <div class="eyebrow">AXION · OPERATIONS</div><h1>Axonic control room</h1>
+      <div class="subtitle">Connections, delivery, and calls. A clear view of what needs attention.</div>
     </div>
     <div class="refresh-info">
-      <span class="tick">●</span> Last update: <span id="lastUpdate">—</span>
+      <span class="tick">●</span> Updates every 10 seconds<br>Last successful check: <span id="lastUpdate">—</span>
       <span id="dataStatus" role="status" aria-live="polite">Loading…</span>
     </div>
   </div>
@@ -164,47 +193,106 @@
   <!-- Stats cards -->
   <div class="stats-grid">
     <div class="stat-card success">
-      <div class="value" id="onlineUsers">0</div>
+      <div class="value" id="onlineUsers">—</div>
       <div class="label">Online (Foreground)</div>
     </div>
     <div class="stat-card" style="border-color: var(--primary);">
-      <div class="value" id="connectedUsers">0</div>
+      <div class="value" id="connectedUsers">—</div>
       <div class="label">Connected (Background)</div>
     </div>
     <div class="stat-card accent">
-      <div class="value" id="totalWs">0</div>
-      <div class="label">Total WS</div>
+      <div class="value" id="totalWs">—</div>
+      <div class="label">Connected users</div>
     </div>
     <div class="stat-card">
-      <div class="value" id="totalUsers">0</div>
+      <div class="value" id="totalUsers">—</div>
       <div class="label">Total Users</div>
     </div>
     <div class="stat-card warning">
-      <div class="value" id="pushTokens">0</div>
+      <div class="value" id="pushTokens">—</div>
       <div class="label">Users with Push Endpoints</div>
     </div>
-    <div class="stat-card">
-      <div class="value" id="msgsHour">0</div>
-      <div class="label">Messages / Hour (Not Collected)</div>
-    </div>
-    <div class="stat-card">
-      <div class="value" id="msgs24h">0</div>
-      <div class="label">Messages / 24h (Not Collected)</div>
-    </div>
-    <div class="stat-card danger">
-      <div class="value" id="unreadMsgs">0</div>
-      <div class="label">Unread (Device-Local)</div>
-    </div>
+
+
+
     <div class="stat-card warning">
-      <div class="value" id="activeCalls">0</div>
+      <div class="value" id="activeCalls">—</div>
       <div class="label">Active Calls</div>
     </div>
   </div>
 
+  <p id="metricScope" class="text-muted"></p>
+  <div class="receipt-strip"><span>Waiting for sender confirmation</span><strong id="receiptBacklog">—</strong><small>Already delivered · sender still needs to store the receipt</small></div>
+  <!-- Reliability KPIs -->
+  <div class="section">
+    <div class="section-title">
+      Delivery & call reliability
+      <span class="badge" id="reliabilityBadge" style="background:var(--accent);">Live</span>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card" id="cardMsgAckRate24h">
+        <div class="value" id="msgAckRate24h">—</div>
+        <div class="label">Recipient Delivery Rate (24h Cohort)</div>
+      </div>
+      <div class="stat-card" id="cardMsgAckAvgMs">
+        <div class="value" id="msgAckAvgMs">—</div>
+        <div class="label">Average delivery time · ms</div>
+      </div>
+      <div class="stat-card" id="cardMsgPendingOverdue">
+        <div class="value" id="msgPendingOverdue">—</div>
+        <div class="label">Receipts past timeout</div>
+      </div>
+      <div class="stat-card" id="cardMsgPushFallback24h">
+        <div class="value" id="msgPushFallback24h">—</div>
+        <div class="label">Push Dispatches (24h)</div>
+      </div>
+      <div class="stat-card" id="cardCallAckRate24h">
+        <div class="value" id="callAckRate24h">—</div>
+        <div class="label">Call invites acknowledged · 24h</div>
+      </div>
+      <div class="stat-card" id="cardCallAckPendingOverdue">
+        <div class="value" id="callAckPendingOverdue">—</div>
+        <div class="label">Call invites past timeout</div>
+      </div>
+    </div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Messages</th>
+          <th>Calls</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Ack timeout (seconds)</td>
+          <td id="msgAckTimeout">-</td>
+          <td id="callAckTimeout">-</td>
+        </tr>
+        <tr>
+          <td>Created/Started (24h)</td>
+          <td id="msgCreated24h">0</td>
+          <td id="callsStarted24h">0</td>
+        </tr>
+        <tr>
+          <td>Delivered/Acked (24h)</td>
+          <td id="msgDelivered24h">0</td>
+          <td id="callsInviteAcked24h">0</td>
+        </tr>
+        <tr>
+          <td>Push sent (24h)</td>
+          <td id="msgPushSent24h">0</td>
+          <td id="callsPushSent24h">0</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+
   <!-- Online Users (app in foreground) -->
   <div class="section">
     <div class="section-title">
-      Online Users (App Foreground) <span class="badge" id="onlineBadge" style="background:var(--success);">0</span>
+      Online now <span class="badge" id="onlineBadge" style="background:var(--success);">0</span>
     </div>
     <table class="data-table">
       <thead>
@@ -223,7 +311,7 @@
   <!-- Connected Users (app in background, WS alive) -->
   <div class="section">
     <div class="section-title">
-      Connected Users (Background / Unknown) <span class="badge" id="bgBadge" style="background:var(--accent);">0</span>
+      Background connections <span class="badge" id="bgBadge" style="background:var(--accent);">0</span>
     </div>
     <table class="data-table">
       <thead>
@@ -267,90 +355,6 @@
     <div class="empty" id="callsEmpty" style="display:none;">No active calls</div>
   </div>
 
-  <p id="metricScope" class="text-muted"></p>
-  <p>Delivered receipts awaiting sender confirmation: <strong id="receiptBacklog">—</strong></p>
-  <!-- Reliability KPIs -->
-  <div class="section">
-    <div class="section-title">
-      Reliability (Trust Layer)
-      <span class="badge" id="reliabilityBadge" style="background:var(--accent);">Live</span>
-    </div>
-    <div class="stats-grid">
-      <div class="stat-card" id="cardMsgAckRate24h">
-        <div class="value" id="msgAckRate24h">0%</div>
-        <div class="label">Recipient Delivery Rate (24h Cohort)</div>
-      </div>
-      <div class="stat-card" id="cardMsgAckAvgMs">
-        <div class="value" id="msgAckAvgMs">-</div>
-        <div class="label">Msg Ack Avg (ms)</div>
-      </div>
-      <div class="stat-card" id="cardMsgPendingOverdue">
-        <div class="value" id="msgPendingOverdue">0</div>
-        <div class="label">Msg Pending Overdue</div>
-      </div>
-      <div class="stat-card" id="cardMsgPushFallback24h">
-        <div class="value" id="msgPushFallback24h">0</div>
-        <div class="label">Push Dispatches (24h)</div>
-      </div>
-      <div class="stat-card" id="cardCallAckRate24h">
-        <div class="value" id="callAckRate24h">0%</div>
-        <div class="label">Call Invite Ack Rate (24h)</div>
-      </div>
-      <div class="stat-card" id="cardCallAckPendingOverdue">
-        <div class="value" id="callAckPendingOverdue">0</div>
-        <div class="label">Call Ack Pending Overdue</div>
-      </div>
-    </div>
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>Metric</th>
-          <th>Messages</th>
-          <th>Calls</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>Ack timeout (seconds)</td>
-          <td id="msgAckTimeout">-</td>
-          <td id="callAckTimeout">-</td>
-        </tr>
-        <tr>
-          <td>Created/Started (24h)</td>
-          <td id="msgCreated24h">0</td>
-          <td id="callsStarted24h">0</td>
-        </tr>
-        <tr>
-          <td>Delivered/Acked (24h)</td>
-          <td id="msgDelivered24h">0</td>
-          <td id="callsInviteAcked24h">0</td>
-        </tr>
-        <tr>
-          <td>Push sent (24h)</td>
-          <td id="msgPushSent24h">0</td>
-          <td id="callsPushSent24h">0</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Chat Activity (Not Collected) -->
-  <div class="section">
-    <div class="section-title">
-      Active Chat Rooms (WS) <span class="badge" id="chatRoomsBadge">0</span>
-    </div>
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>Room ID</th>
-          <th>Connected Users</th>
-        </tr>
-      </thead>
-      <tbody id="chatRoomsBody"></tbody>
-    </table>
-    <div class="empty" id="chatRoomsEmpty" style="display:none;">Room sockets are retired. Axion does not currently report which chats are open.</div>
-  </div>
-
   <div class="section">
     <div class="section-title">
       Routing Inspector <span class="badge" id="routingInspectorBadge" style="background:var(--accent);">Idle</span>
@@ -360,7 +364,7 @@
     <div id="routingInspector" style="display:none;">
       <div class="inspector-grid" id="routingInspectorCards"></div>
       <div class="section-title" style="font-size:1rem; margin-top:12px;">
-        Recent Decisions <span class="badge" id="routingDecisionsBadge">0</span>
+        Recent routing decisions <span class="badge" id="routingDecisionsBadge">0</span>
       </div>
       <table class="data-table">
         <thead>
@@ -375,56 +379,34 @@
         </thead>
         <tbody id="routingDecisionsBody"></tbody>
       </table>
-      <div class="empty" id="routingDecisionsEmpty" style="display:none;">No recent decisions for this user.</div>
+      <div class="empty" id="routingDecisionsEmpty" style="display:none;">No decisions captured on this server process. This is not a complete delivery history.</div>
     </div>
-  </div>
-
-  <!-- Recent Messages -->
-  <div class="section">
-    <div class="section-title">
-      Message Content <span class="badge">Not Collected</span>
-    </div>
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>From</th>
-          <th>Type</th>
-          <th>Content</th>
-          <th>Read</th>
-        </tr>
-      </thead>
-      <tbody id="recentBody"></tbody>
-    </table>
   </div>
 
   <!-- Room Stats -->
   <div class="section">
-    <div class="section-title">Room Statistics</div>
+    <div class="section-title">Network overview</div>
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="value" id="totalRooms">0</div>
+        <div class="value" id="totalRooms">—</div>
         <div class="label">Total Rooms</div>
       </div>
       <div class="stat-card">
-        <div class="value" id="directRooms">0</div>
+        <div class="value" id="directRooms">—</div>
         <div class="label">Direct</div>
       </div>
       <div class="stat-card accent">
-        <div class="value" id="groupRooms">0</div>
+        <div class="value" id="groupRooms">—</div>
         <div class="label">Group</div>
       </div>
+
       <div class="stat-card">
-        <div class="value" id="totalMsgs">0</div>
-        <div class="label">Total Messages</div>
-      </div>
-      <div class="stat-card">
-        <div class="value" id="callsToday">0</div>
-        <div class="label">Calls Today</div>
+        <div class="value" id="callsToday">—</div>
+        <div class="label">Calls · last 24 hours</div>
       </div>
       <div class="stat-card danger">
-        <div class="value" id="missedToday">0</div>
-        <div class="label">Missed Today</div>
+        <div class="value" id="missedToday">—</div>
+        <div class="label">Missed · last 24 hours</div>
       </div>
     </div>
   </div>
@@ -477,7 +459,7 @@ function setReliabilityBadge(level, label) {
 }
 
 function percent(v) {
-  if (v === null || v === undefined || Number.isNaN(Number(v))) return '0%';
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return 'No samples';
   return (Number(v) * 100).toFixed(1) + '%';
 }
 
@@ -520,10 +502,8 @@ async function loadRoutingInspector(userId) {
       ['User', `${data.user.display_name} (@${data.user.username})`],
       ['Presence', data.routing_state.presence],
       ['App State', data.routing_state.app_state],
-      ['Chat WS', `${data.routing_state.chat_ws_connected ? 'yes' : 'no'} (${data.routing_state.chat_ws_count})`],
-      ['Notif WS', `${data.routing_state.notification_ws_connected ? 'yes' : 'no'} (${data.routing_state.notification_ws_count})`],
+            ['Axion', `${data.routing_state.notification_ws_connected ? 'yes' : 'no'} (${data.routing_state.notification_ws_count})`],
       ['Push Available', data.routing_state.push_available ? 'yes' : 'no'],
-      ['Active Room', data.routing_state.active_room_id || '—'],
       ['Devices', String(data.device_count)],
     ];
     document.getElementById('routingInspectorCards').innerHTML = cards.map(([k, v]) => `
@@ -551,6 +531,7 @@ async function loadRoutingInspector(userId) {
       </tr>`;
     });
   } catch (err) {
+    setVal('routingInspectorBadge', 'Refresh failed');
     console.error('Routing inspector error:', err);
   }
 }
@@ -571,9 +552,6 @@ async function refresh() {
     setVal('totalWs', d.websockets.notification_count);
     setVal('totalUsers', d.users.total);
     setVal('pushTokens', d.users.with_push_token);
-    setVal('msgsHour', d.messages.last_hour);
-    setVal('msgs24h', d.messages.last_24h);
-    setVal('unreadMsgs', d.messages.unread);
     setVal('activeCalls', d.calls.active_count);
 
     // Badges
@@ -582,13 +560,11 @@ async function refresh() {
     const offlineWithPush = d.users.offline_with_push;
     setVal('offlineBadge', offlineWithPush);
     setVal('callsBadge', d.calls.active_count);
-    setVal('chatRoomsBadge', d.websockets.chat_rooms_active);
 
     // Room stats
     setVal('totalRooms', d.rooms.total);
     setVal('directRooms', d.rooms.direct);
     setVal('groupRooms', d.rooms.group);
-    setVal('totalMsgs', d.messages.total);
     setVal('callsToday', d.calls.today_total);
     setVal('missedToday', d.calls.today_missed);
 
@@ -596,7 +572,7 @@ async function refresh() {
     renderTable('onlineBody', 'onlineEmpty', d.websockets.online_users, u =>
       `<tr>
         <td>${statusDot('green')}</td>
-        <td><span class="clickable-user" onclick="loadRoutingInspector(${u.user_id})">${escapeHtml(u.username)}</span></td>
+        <td><button type="button" class="clickable-user" onclick="loadRoutingInspector(${u.user_id})">${escapeHtml(u.username)}</button></td>
         <td>${timeAgo(u.connected_at)}</td>
         <td>${u.connections}</td>
       </tr>`
@@ -606,7 +582,7 @@ async function refresh() {
     renderTable('bgBody', 'bgEmpty', d.websockets.background_users, u =>
       `<tr>
         <td>${statusDot('purple')}</td>
-        <td><span class="clickable-user" onclick="loadRoutingInspector(${u.user_id})">${escapeHtml(u.username)}</span></td>
+        <td><button type="button" class="clickable-user" onclick="loadRoutingInspector(${u.user_id})">${escapeHtml(u.username)}</button></td>
         <td>${timeAgo(u.connected_at)}</td>
         <td>${u.connections}</td>
       </tr>`
@@ -693,19 +669,6 @@ async function refresh() {
     } else {
       setReliabilityBadge('healthy', msgAckRate == null && callAckRate == null ? 'No samples' : 'Within thresholds');
     }
-
-    // Active chat rooms
-    const chatRoomRows = Object.entries(d.websockets.chat_rooms).map(
-      ([rid, count]) => ({ rid, count })
-    );
-    renderTable('chatRoomsBody', 'chatRoomsEmpty', chatRoomRows, r =>
-      `<tr>
-        <td style="font-family:monospace;font-size:.8rem;">${r.rid}</td>
-        <td>${r.count}</td>
-      </tr>`
-    );
-
-    document.getElementById('recentBody').innerHTML = '<tr><td colspan="5">Message content and read history stay on devices; this monitor uses delivery metadata only.</td></tr>';
 
     // Last update
     setVal('lastUpdate', new Date(d.server_time).toLocaleTimeString());
