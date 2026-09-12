@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Monitor · MyChat{% endblock %}
+{% block title %}Monitor · Axonic{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -157,6 +157,7 @@
     </div>
     <div class="refresh-info">
       <span class="tick">●</span> Last update: <span id="lastUpdate">—</span>
+      <span id="dataStatus" role="status" aria-live="polite">Loading…</span>
     </div>
   </div>
 
@@ -180,19 +181,19 @@
     </div>
     <div class="stat-card warning">
       <div class="value" id="pushTokens">0</div>
-      <div class="label">Push Tokens</div>
+      <div class="label">Users with Push Endpoints</div>
     </div>
     <div class="stat-card">
       <div class="value" id="msgsHour">0</div>
-      <div class="label">Msgs / Hour</div>
+      <div class="label">Messages / Hour (Not Collected)</div>
     </div>
     <div class="stat-card">
       <div class="value" id="msgs24h">0</div>
-      <div class="label">Msgs / 24h</div>
+      <div class="label">Messages / 24h (Not Collected)</div>
     </div>
     <div class="stat-card danger">
       <div class="value" id="unreadMsgs">0</div>
-      <div class="label">Unread Msgs</div>
+      <div class="label">Unread (Device-Local)</div>
     </div>
     <div class="stat-card warning">
       <div class="value" id="activeCalls">0</div>
@@ -222,7 +223,7 @@
   <!-- Connected Users (app in background, WS alive) -->
   <div class="section">
     <div class="section-title">
-      Connected Users (Background WS) <span class="badge" id="bgBadge" style="background:var(--accent);">0</span>
+      Connected Users (Background / Unknown) <span class="badge" id="bgBadge" style="background:var(--accent);">0</span>
     </div>
     <table class="data-table">
       <thead>
@@ -243,7 +244,7 @@
     <div class="section-title">
       Offline Users (Push Only) <span class="badge" id="offlineBadge" style="background:var(--warning);color:#000;">0</span>
     </div>
-    <p class="text-muted" style="font-size:.85rem;">Users NOT connected via WebSocket but have a push token — will receive notifications via Expo/FCM push.</p>
+    <p class="text-muted" style="font-size:.85rem;">Users without a fresh Axion session who have an active FCM/Expo endpoint. Push delivery still depends on preferences, permissions, and provider availability.</p>
   </div>
 
   <!-- Active Calls -->
@@ -266,6 +267,8 @@
     <div class="empty" id="callsEmpty" style="display:none;">No active calls</div>
   </div>
 
+  <p id="metricScope" class="text-muted"></p>
+  <p>Delivered receipts awaiting sender confirmation: <strong id="receiptBacklog">—</strong></p>
   <!-- Reliability KPIs -->
   <div class="section">
     <div class="section-title">
@@ -275,7 +278,7 @@
     <div class="stats-grid">
       <div class="stat-card" id="cardMsgAckRate24h">
         <div class="value" id="msgAckRate24h">0%</div>
-        <div class="label">Msg Ack Rate (24h)</div>
+        <div class="label">Recipient Delivery Rate (24h Cohort)</div>
       </div>
       <div class="stat-card" id="cardMsgAckAvgMs">
         <div class="value" id="msgAckAvgMs">-</div>
@@ -287,7 +290,7 @@
       </div>
       <div class="stat-card" id="cardMsgPushFallback24h">
         <div class="value" id="msgPushFallback24h">0</div>
-        <div class="label">Msg Push Fallback (24h)</div>
+        <div class="label">Push Dispatches (24h)</div>
       </div>
       <div class="stat-card" id="cardCallAckRate24h">
         <div class="value" id="callAckRate24h">0%</div>
@@ -331,7 +334,7 @@
     </table>
   </div>
 
-  <!-- Active Chat Rooms (WS) -->
+  <!-- Chat Activity (Not Collected) -->
   <div class="section">
     <div class="section-title">
       Active Chat Rooms (WS) <span class="badge" id="chatRoomsBadge">0</span>
@@ -345,7 +348,7 @@
       </thead>
       <tbody id="chatRoomsBody"></tbody>
     </table>
-    <div class="empty" id="chatRoomsEmpty" style="display:none;">No active chat rooms</div>
+    <div class="empty" id="chatRoomsEmpty" style="display:none;">Room sockets are retired. Axion does not currently report which chats are open.</div>
   </div>
 
   <div class="section">
@@ -379,7 +382,7 @@
   <!-- Recent Messages -->
   <div class="section">
     <div class="section-title">
-      Recent Messages <span class="badge">Last 10</span>
+      Message Content <span class="badge">Not Collected</span>
     </div>
     <table class="data-table">
       <thead>
@@ -430,7 +433,8 @@
 <script>
 const API = '/api/monitor/';
 const ROUTING_API_BASE = '/api/monitor/routing/';
-const INTERVAL = 3000;
+const INTERVAL = 10000;
+let refreshInFlight = false;
 let selectedRoutingUserId = null;
 
 function timeAgo(iso) {
@@ -449,7 +453,7 @@ function shortTime(iso) {
 
 function setVal(id, v) {
   const el = document.getElementById(id);
-  if (el) el.textContent = v;
+  if (el) el.textContent = v == null ? 'Unavailable' : v;
 }
 
 function setCardTone(id, tone) {
@@ -552,8 +556,13 @@ async function loadRoutingInspector(userId) {
 }
 
 async function refresh() {
+  if (refreshInFlight || document.hidden) return;
+  refreshInFlight = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const res = await fetch(API);
+    const res = await fetch(API, { signal: controller.signal, cache: 'no-store' });
+    if (!res.ok || res.redirected) throw new Error('Monitor unavailable or admin session expired');
     const d = await res.json();
 
     // Stats cards
@@ -570,8 +579,8 @@ async function refresh() {
     // Badges
     setVal('onlineBadge', d.websockets.online_count);
     setVal('bgBadge', d.websockets.background_count);
-    const offlineWithPush = d.users.with_push_token - d.websockets.notification_count;
-    setVal('offlineBadge', Math.max(0, offlineWithPush));
+    const offlineWithPush = d.users.offline_with_push;
+    setVal('offlineBadge', offlineWithPush);
     setVal('callsBadge', d.calls.active_count);
     setVal('chatRoomsBadge', d.websockets.chat_rooms_active);
 
@@ -607,8 +616,8 @@ async function refresh() {
     renderTable('callsBody', 'callsEmpty', d.calls.active, c =>
       `<tr>
         <td>${statusDot(c.status === 'ringing' ? 'yellow' : 'green')}</td>
-        <td>${c.caller__username}</td>
-        <td>${c.callee__username}</td>
+        <td>${escapeHtml(c.caller__username)}</td>
+        <td>${escapeHtml(c.callee__username)}</td>
         <td>${c.status}</td>
         <td>${timeAgo(c.started_at)}</td>
       </tr>`
@@ -636,11 +645,10 @@ async function refresh() {
     setVal('msgPushSent24h', relMsg.push_fallback_24h ?? 0);
     setVal('callsPushSent24h', relCall.push_sent_24h ?? 0);
 
-    const msgAckRate = Number(relMsg.ack_rate_24h ?? 0);
-    const callAckRate = Number(relCall.invite_ack_rate_24h ?? 0);
+    const msgAckRate = relMsg.ack_rate_24h == null ? null : Number(relMsg.ack_rate_24h);
+    const callAckRate = relCall.invite_ack_rate_24h == null ? null : Number(relCall.invite_ack_rate_24h);
     const msgOverdue = Number(relMsg.pending_overdue ?? 0);
     const callOverdue = Number(relCall.ack_pending_overdue ?? 0);
-    const msgFallback = Number(relMsg.push_fallback_24h ?? 0);
     const msgAckAvg = relMsg.ack_latency_avg_ms_24h == null ? null : Number(relMsg.ack_latency_avg_ms_24h);
 
     const msgAckHealthy = Number(t.msg_ack_rate_healthy ?? 0.99);
@@ -651,16 +659,14 @@ async function refresh() {
     const msgOverdueCrit = Number(t.msg_pending_overdue_crit ?? 10);
     const callOverdueWarn = Number(t.call_pending_overdue_warn ?? 1);
     const callOverdueCrit = Number(t.call_pending_overdue_crit ?? 5);
-    const msgFallbackWarn = Number(t.msg_push_fallback_warn ?? 1);
-    const msgFallbackCrit = Number(t.msg_push_fallback_crit ?? 20);
     const msgAckAvgHealthy = Number(t.msg_ack_avg_ms_healthy ?? 1200);
     const msgAckAvgDegraded = Number(t.msg_ack_avg_ms_degraded ?? 3500);
 
-    setCardTone('cardMsgAckRate24h', msgAckRate >= msgAckHealthy ? 'success' : (msgAckRate >= msgAckDegraded ? 'warning' : 'danger'));
-    setCardTone('cardCallAckRate24h', callAckRate >= callAckHealthy ? 'success' : (callAckRate >= callAckDegraded ? 'warning' : 'danger'));
+    setCardTone('cardMsgAckRate24h', msgAckRate == null ? 'accent' : msgAckRate >= msgAckHealthy ? 'success' : (msgAckRate >= msgAckDegraded ? 'warning' : 'danger'));
+    setCardTone('cardCallAckRate24h', callAckRate == null ? 'accent' : callAckRate >= callAckHealthy ? 'success' : (callAckRate >= callAckDegraded ? 'warning' : 'danger'));
     setCardTone('cardMsgPendingOverdue', msgOverdue < msgOverdueWarn ? 'success' : (msgOverdue <= msgOverdueCrit ? 'warning' : 'danger'));
     setCardTone('cardCallAckPendingOverdue', callOverdue < callOverdueWarn ? 'success' : (callOverdue <= callOverdueCrit ? 'warning' : 'danger'));
-    setCardTone('cardMsgPushFallback24h', msgFallback < msgFallbackWarn ? 'success' : (msgFallback <= msgFallbackCrit ? 'warning' : 'danger'));
+    setCardTone('cardMsgPushFallback24h', 'accent');
     if (msgAckAvg == null) {
       setCardTone('cardMsgAckAvgMs', 'accent');
     } else {
@@ -668,18 +674,16 @@ async function refresh() {
     }
 
     const severe =
-      msgAckRate < msgAckDegraded ||
-      callAckRate < callAckDegraded ||
+      (msgAckRate != null && msgAckRate < msgAckDegraded) ||
+      (callAckRate != null && callAckRate < callAckDegraded) ||
       msgOverdue > msgOverdueCrit ||
       callOverdue > callOverdueCrit ||
-      msgFallback > msgFallbackCrit ||
       (msgAckAvg != null && msgAckAvg > msgAckAvgDegraded);
     const warning = !severe && (
-      msgAckRate < msgAckHealthy ||
-      callAckRate < callAckHealthy ||
+      (msgAckRate != null && msgAckRate < msgAckHealthy) ||
+      (callAckRate != null && callAckRate < callAckHealthy) ||
       msgOverdue >= msgOverdueWarn ||
       callOverdue >= callOverdueWarn ||
-      msgFallback >= msgFallbackWarn ||
       (msgAckAvg != null && msgAckAvg > msgAckAvgHealthy)
     );
     if (severe) {
@@ -687,7 +691,7 @@ async function refresh() {
     } else if (warning) {
       setReliabilityBadge('degraded', 'Degraded');
     } else {
-      setReliabilityBadge('healthy', 'Healthy');
+      setReliabilityBadge('healthy', msgAckRate == null && callAckRate == null ? 'No samples' : 'Within thresholds');
     }
 
     // Active chat rooms
@@ -701,30 +705,29 @@ async function refresh() {
       </tr>`
     );
 
-    // Recent messages
-    const recentBody = document.getElementById('recentBody');
-    recentBody.innerHTML = d.messages.recent.map(m =>
-      `<tr>
-        <td>${shortTime(m.created_at)}</td>
-        <td>${m.sender__username || '—'}</td>
-        <td>${m.message_type}</td>
-        <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.content || '—'}</td>
-        <td>${m.is_read ? statusDot('green') + 'Yes' : statusDot('red') + 'No'}</td>
-      </tr>`
-    ).join('');
+    document.getElementById('recentBody').innerHTML = '<tr><td colspan="5">Message content and read history stay on devices; this monitor uses delivery metadata only.</td></tr>';
 
     // Last update
-    setVal('lastUpdate', new Date().toLocaleTimeString());
+    setVal('lastUpdate', new Date(d.server_time).toLocaleTimeString());
+    setVal('dataStatus', 'Current');
+    setVal('metricScope', rel.scope);
+    setVal('receiptBacklog', relMsg.sender_confirmation_pending);
     if (selectedRoutingUserId) {
       loadRoutingInspector(selectedRoutingUserId);
     }
 
   } catch (err) {
     console.error('Monitor fetch error:', err);
+    setVal('dataStatus', 'STALE — refresh failed; check connection/admin login');
+    setReliabilityBadge('degraded', 'Data unavailable');
+  } finally {
+    clearTimeout(timeout);
+    refreshInFlight = false;
   }
 }
 
 refresh();
 setInterval(refresh, INTERVAL);
+document.addEventListener('visibilitychange', refresh);
 </script>
 {% endblock %}

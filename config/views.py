@@ -9,7 +9,7 @@ from urllib.parse import quote
 from django.contrib.auth import get_user_model
 from django.contrib.admin.views.decorators import staff_member_required
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Avg, DurationField, ExpressionWrapper, F, Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -112,10 +112,10 @@ def monitor_view(request):
 
 
 @staff_member_required
+@never_cache
 def monitor_api(request):
     """JSON API for the monitoring dashboard — polled every few seconds."""
     from calls.models import CallLog
-    from chat.consumers import get_connected_chat_rooms, get_connected_notification_users
     from chat.models import ChatRoom, MessageDelivery
     from users.models import UserPresence
 
@@ -123,41 +123,40 @@ def monitor_api(request):
     one_hour_ago = now - timedelta(hours=1)
     one_day_ago = now - timedelta(days=1)
 
-    # ── Users ──
+    # Shared, expiring Axion leases work across Railway processes/replicas.
+    from users.models import UserPresenceSession
+    from users.presence import stale_seconds
     total_users = User.objects.count()
-    presence_rows = UserPresence.objects.filter(is_online=True).select_related("user")
-    online_users = [presence for presence in presence_rows if effective_presence_is_online(presence)]
-    online_list = [
-        {
-            "id": presence.user_id,
-            "username": presence.user.username,
-            "last_seen": presence.last_seen.isoformat() if presence.last_seen else None,
-        }
-        for presence in sorted(online_users, key=lambda row: row.last_seen or now, reverse=True)
-    ]
-
-    users_with_push = User.objects.filter(
-        devices__is_active=True,
-    ).filter(
-        Q(devices__expo_push_token__startswith="ExponentPushToken[")
-        | Q(devices__expo_push_token__startswith="ExpoPushToken[")
-    ).distinct().count()
-
-    # ── WebSocket connections (in-memory) ──
-    ws_notification_users = get_connected_notification_users()
-    ws_chat_rooms = get_connected_chat_rooms()
-
-    # Derive online (foreground) vs connected (background) from WS tracking
-    ws_online = [u for u in ws_notification_users if u.get("app_state") == "active"]
-    ws_background = [u for u in ws_notification_users if u.get("app_state") != "active"]
-
-    # ── Messages ──
-    # Messages are no longer persisted server-side (WS-only relay), so
-    # historical counts are not available. Return zeros for dashboard compat.
-    total_messages = 0
-    messages_last_hour = 0
-    messages_last_24h = 0
-    unread_messages = 0
+    leases = UserPresenceSession.objects.filter(
+        last_seen__gte=now - timedelta(seconds=stale_seconds()),
+    ).select_related("user")
+    by_user = {}
+    for lease in leases:
+        row = by_user.setdefault(lease.user_id, {
+            "user_id": lease.user_id, "username": lease.user.username,
+            "connected_at": lease.connected_at.isoformat(), "connections": 0,
+            "app_state": lease.app_state, "last_seen": lease.last_seen.isoformat(),
+        })
+        row["connections"] += 1
+        row["connected_at"] = min(row["connected_at"], lease.connected_at.isoformat())
+        row["last_seen"] = max(row["last_seen"], lease.last_seen.isoformat())
+        if lease.app_state == UserPresence.APP_STATE_ACTIVE:
+            row["app_state"] = UserPresence.APP_STATE_ACTIVE
+    ws_notification_users = list(by_user.values())
+    ws_online = [u for u in ws_notification_users if u["app_state"] == "active"]
+    ws_background = [u for u in ws_notification_users if u["app_state"] != "active"]
+    online_users = ws_online
+    online_list = [{"id": u["user_id"], "username": u["username"], "last_seen": u["last_seen"]} for u in ws_online]
+    push_user_ids = set(UserDevice.objects.filter(is_active=True).filter(
+        Q(expo_push_token__startswith="ExponentPushToken[")
+        | Q(expo_push_token__startswith="ExpoPushToken[")
+        | (~Q(fcm_token="") & Q(fcm_token__isnull=False))
+    ).values_list("user_id", flat=True))
+    users_with_push = len(push_user_ids)
+    offline_with_push = len(push_user_ids - set(by_user))
+    # Room sockets no longer represent current chat activity.
+    ws_chat_rooms = {}
+    total_messages = messages_last_hour = messages_last_24h = unread_messages = None
 
     # ── Rooms ──
     total_rooms = ChatRoom.objects.count()
@@ -186,7 +185,7 @@ def monitor_api(request):
 
     msg_created_24h = MessageDelivery.objects.filter(created_at__gte=one_day_ago).count()
     msg_delivered_24h = MessageDelivery.objects.filter(
-        delivered_at__gte=one_day_ago,
+        created_at__gte=one_day_ago,
         status=MessageDelivery.STATUS_DELIVERED,
     ).count()
     msg_pending_total = MessageDelivery.objects.filter(
@@ -200,16 +199,12 @@ def monitor_api(request):
         push_sent_at__gte=one_day_ago,
     ).count()
 
-    delivered_rows = MessageDelivery.objects.filter(
-        delivered_at__gte=one_day_ago,
+    ack_average = MessageDelivery.objects.filter(
+        created_at__gte=one_day_ago,
+        delivered_at__gte=F("created_at"),
         status=MessageDelivery.STATUS_DELIVERED,
-    ).values("created_at", "delivered_at")
-    ack_samples = [
-        (row["delivered_at"] - row["created_at"]).total_seconds() * 1000
-        for row in delivered_rows
-        if row.get("created_at") and row.get("delivered_at")
-    ]
-    msg_ack_avg_ms_24h = round(sum(ack_samples) / len(ack_samples), 2) if ack_samples else None
+    ).aggregate(value=Avg(ExpressionWrapper(F("delivered_at") - F("created_at"), output_field=DurationField())))["value"]
+    msg_ack_avg_ms_24h = round(ack_average.total_seconds() * 1000, 2) if ack_average is not None else None
 
     call_ack_timeout_s = int(getattr(settings, "CALL_INVITE_ACK_TIMEOUT_SECONDS", 12))
     call_overdue_cutoff = now - timedelta(seconds=call_ack_timeout_s)
@@ -239,12 +234,15 @@ def monitor_api(request):
     return JsonResponse({
         "server_time": now.isoformat(),
         "users": {
+            "offline_with_push": offline_with_push,
             "total": total_users,
             "online_db": len(online_users),
             "online_list": online_list,
             "with_push_token": users_with_push,
         },
         "websockets": {
+            "scope": "shared_axion_leases",
+            "connection_count": sum(u["connections"] for u in ws_notification_users),
             "notification_users": ws_notification_users,
             "notification_count": len(ws_notification_users),
             "online_count": len(ws_online),
@@ -252,7 +250,7 @@ def monitor_api(request):
             "background_count": len(ws_background),
             "background_users": ws_background,
             "chat_rooms": ws_chat_rooms,
-            "chat_rooms_active": len(ws_chat_rooms),
+            "chat_rooms_active": None,
         },
         "messages": {
             "total": total_messages,
@@ -273,6 +271,7 @@ def monitor_api(request):
             "today_missed": missed_calls_today,
         },
         "reliability": {
+            "scope": "Retained per-recipient delivery records; not lifetime message totals. Offline delivery time is included in latency.",
             "message_ack_timeout_seconds": msg_ack_timeout_s,
             "thresholds": {
                 "msg_ack_rate_healthy": float(getattr(settings, "MONITOR_MSG_ACK_RATE_HEALTHY", 0.99)),
@@ -289,6 +288,7 @@ def monitor_api(request):
                 "msg_ack_avg_ms_degraded": int(getattr(settings, "MONITOR_MSG_ACK_AVG_MS_DEGRADED", 3500)),
             },
             "messages": {
+                "sender_confirmation_pending": MessageDelivery.objects.filter(status=MessageDelivery.STATUS_DELIVERED, sender_confirmed_at__isnull=True).count(),
                 "created_24h": msg_created_24h,
                 "delivered_24h": msg_delivered_24h,
                 "ack_rate_24h": round((msg_delivered_24h / msg_created_24h), 4) if msg_created_24h else None,
