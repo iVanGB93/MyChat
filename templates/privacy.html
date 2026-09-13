@@ -35,7 +35,7 @@
 <body>
     <header><nav class="shell" aria-label="Main navigation"><a class="brand" href="{% url 'home' %}">AXONIC</a><a href="{% url 'login' %}">Open web app</a></nav></header>
     <main class="shell">
-        <p class="date">Last updated: September 9, 2026</p>
+        <p class="date">Last updated: September 13, 2026</p>
         <h1>Privacy policy</h1>
         <p>This policy explains how Axonic handles information when you use its messaging app and website. For privacy questions, contact the Axonic developer at <a href="mailto:ivanguachbeltran@gmail.com">ivanguachbeltran@gmail.com</a>.</p>
         <div class="summary"><p>Your device holds your local conversations and downloaded media. Axonic also processes information on servers to operate accounts, deliver messages and files, coordinate calls, and send notifications. Device-first storage does not mean that information never passes through a server.</p></div>
@@ -49,6 +49,7 @@
             <li><strong>Contacts and groups:</strong> Axonic contact relationships, blocked users, group names, pictures, roles, and membership support private and group conversations. Contact nicknames you create are stored locally on your device.</li>
             <li><strong>Calls:</strong> microphone audio and camera video are used when you make calls or record media. Call signaling and network information help establish connections, sometimes through relay servers. Call history includes participants, type, time, duration, and status; this is separate from the call's audio or video.</li>
             <li><strong>Device and connection information:</strong> installation identifiers, push-notification tokens, platform, device name, app version, online/last-active state, IP addresses, and diagnostic logs help deliver notifications, manage sessions, investigate errors, and prevent abuse.</li>
+            <li><strong>App reliability diagnostics:</strong> supported app versions send crash reports to Sentry when crash reporting is configured. Reports can include error types, code stack traces, app/build version, device model, operating-system version, and limited technical state such as connection status. Reports may be queued on your device and sent after reopening the app or reconnecting. We do not intentionally include conversation content, media, contact names, passwords, or access tokens. JavaScript reports are filtered before transmission; native crash reports are produced by the platform SDK and may contain additional technical diagnostics. Screen recordings, screenshots, and session replay are disabled for this integration.</li>
             <li><strong>Emails and support:</strong> we process your email for verification, password recovery, optional offline-message reminders, and support requests. Email providers process the recipient address and email content to deliver these messages.</li>
         </ul></section>
 
@@ -56,6 +57,9 @@
         <p>People you communicate with receive the content you send and the profile, group, presence, and message-status information needed for those interactions. They may save, forward, or capture that content.</p>
         <p>Service providers process information to operate Axonic: Railway provides backend hosting; DigitalOcean Spaces stores shared media; Google/Firebase supports Google sign-in and Android push delivery; Expo may support push delivery on supported clients; and configured email and call-relay providers support email and calls. Push payloads may contain sender details, message previews, or information needed to retrieve a message, depending on the app version and notification settings.</p>
         <p>Information may also be disclosed where required by law or necessary to investigate abuse and protect users or the service. Providers may process information in countries other than your own.</p></section>
+
+        <section id="diagnostics"><h2>Reliability service providers</h2>
+        <p>Sentry processes crash diagnostics to help us identify and fix app errors. These reports are sent directly to Sentry rather than through Axonic's messaging server. Expo processes configured app startup and performance measurements. These services receive network requests and therefore process network information needed to receive them. See <a href="https://sentry.io/privacy/" rel="noopener noreferrer">Sentry's privacy policy</a> and <a href="https://expo.dev/privacy" rel="noopener noreferrer">Expo's privacy policy</a>. Diagnostic retention depends on the provider plan and project configuration; crash reports are not a backup of your chats. Contact us with questions or requests about diagnostics.</p></section>
 
         <section id="retention"><h2>3. Storage, retention, and security</h2>
         <p>Account and profile information is retained while your account exists. The server keeps operational metadata for delivery, membership, and calls; it is not a permanent backup of your device's complete chat history. Messages and media may still pass through backend or notification services during delivery.</p>
