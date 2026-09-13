@@ -1,2 +1,4 @@
 [phases.setup]
-nixPkgs = ["...", "postgresql_17"]
+# Replace auto-detected PostgreSQL 16 development tools: mixing major versions
+# makes Nix fail with a pg_config collision before the Worker can build.
+nixPkgs = ["python313", "gcc", "postgresql_17"]
