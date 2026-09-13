@@ -34,11 +34,10 @@ def landing_view(request):
 
 @never_cache
 def app_version_view(request):
-    """Public endpoint the mobile app polls on launch to decide whether to
-    suggest (or force) an update. No auth — must work before/around login.
+    """Compatibility policy for old clients; Google Play determines availability.
 
     Response:
-      latest          — newest published version
+      latest          — empty; no manually maintained release number
       min_supported   — clients below this are forced to update
       store_url        — platform-specific store link
       store_url_android / store_url_ios

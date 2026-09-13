@@ -47,3 +47,6 @@ class AppVersionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["store_url"], "")
+
+    def test_default_policy_does_not_advertise_stale_release(self):
+        self.assertEqual(self.client.get(reverse("app-version")).json()["latest"], "")

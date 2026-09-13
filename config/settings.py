@@ -10,6 +10,7 @@ from pathlib import Path
 
 import dj_database_url
 from dotenv import load_dotenv
+from .runtime_config import resolve_broker_url
 
 load_dotenv()
 
@@ -32,7 +33,9 @@ ALLOWED_HOSTS = ['*']
 #   optional update. MIN_SUPPORTED_VERSION: clients below it are FORCED to update
 #   (e.g. after a breaking WS/protocol change). Bump these on release; overridable
 #   via env on Railway without a code deploy.
-APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "1.0.25")
+# Google Play is authoritative for available Android updates. Keep the response
+# field empty for older clients, which safely fall back to their installed version.
+APP_LATEST_VERSION = ""
 APP_MIN_SUPPORTED_VERSION = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0")
 APP_STORE_URL_ANDROID = os.getenv(
     "APP_STORE_URL_ANDROID",
@@ -48,6 +51,15 @@ CSRF_TRUSTED_ORIGINS = [
 
 # Railway runs behind a proxy
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_SSL_REDIRECT = not DEBUG
+# Railway probes reach the container over HTTP; public pages still redirect.
+SECURE_REDIRECT_EXEMPT = [r"^health/$", r"^ready/$"]
+SECURE_HSTS_SECONDS = 3600 if not DEBUG else 0
+# Do not impose HTTPS on unrelated subdomains or opt into irreversible preload.
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +272,13 @@ if not DEBUG:
 # Celery
 # ---------------------------------------------------------------------------
 
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
+CELERY_BROKER_URL = resolve_broker_url(
+    os.getenv("CELERY_BROKER_URL"), _REDIS_URL, production=not DEBUG,
+)
+# Celery gives its environment variable precedence over Django's setting.
+# Normalize that value too, otherwise an old localhost override still wins.
+if not DEBUG:
+    os.environ["CELERY_BROKER_URL"] = CELERY_BROKER_URL
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"

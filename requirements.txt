@@ -1,6 +1,7 @@
 # Django core
-django>=5.0,<7.0
-djangorestframework>=3.15
+-c requirements.lock
+django==6.1.1
+djangorestframework==3.18.1
 djangorestframework-simplejwt>=5.3
 
 # Real-time / WebSockets
@@ -35,6 +36,5 @@ cachecontrol>=0.14,<1
 boto3>=1.35,<2
 
 # Push (FCM v1 data messages for WhatsApp-style background delivery)
-# Pinned to 6.x: firebase-admin 7.x requires PyJWT>=2.10.1, which conflicts
-# with djangorestframework-simplejwt (<2.10.0).
+# Keep the existing Firebase major version until a separately tested upgrade.
 firebase-admin>=6.5,<7

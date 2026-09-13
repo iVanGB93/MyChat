@@ -9,6 +9,7 @@ from django.http import JsonResponse
 from django.urls import include, path
 
 from . import views
+from .health import readiness
 from users.views import serve_blob, serve_profile_object
 
 
@@ -19,6 +20,7 @@ def health_check(request):
 urlpatterns = [
     # Health check (for Railway / load balancers)
     path("health/", health_check, name="health"),
+    path("ready/", readiness, name="readiness"),
     # Mobile app version gate (public — used to suggest/force updates)
     path("api/app/version/", views.app_version_view, name="app-version"),
     # DB-backed media (avatars, etc.) — survives ephemeral filesystems.
