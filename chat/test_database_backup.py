@@ -19,17 +19,17 @@ class DatabaseBackupTests(SimpleTestCase):
                                    "USER": "test", "PASSWORD": "never-in-command-args", "HOST": "db"}},
         )
         self.client = MagicMock()
-        self.client.get_bucket_acl.return_value = {"Grants": []}
-        self.client.get_bucket_policy.side_effect = ClientError({"Error": {"Code": "NoSuchBucketPolicy"}}, "GetBucketPolicy")
+        self.anonymous = MagicMock()
+        self.anonymous.get_object.side_effect = ClientError({"ResponseMetadata": {"HTTPStatusCode": 403}}, "GetObject")
         for target, kwargs in [
             ("chat.management.commands.backup_database.settings", {"new": self.settings}),
-            ("chat.management.commands.backup_database.boto3.client", {"return_value": self.client}),
+            ("chat.management.commands.backup_database.boto3.client", {"side_effect": [self.client, self.anonymous]}),
             ("chat.management.commands.backup_database.shutil.which", {"return_value": "/bin/tool"}),
         ]:
             p = patch(target, **kwargs)
             p.start()
             self.addCleanup(p.stop)
-        p = patch.dict("os.environ", {"BACKUP_SPACES_BUCKET": "backups"})
+        p = patch.dict("os.environ", {"BACKUP_SPACES_BUCKET": "backups", "BACKUP_SPACES_ACCESS_KEY": "scoped-id", "BACKUP_SPACES_SECRET_KEY": "scoped-secret"})
         p.start()
         self.addCleanup(p.stop)
 
@@ -39,14 +39,19 @@ class DatabaseBackupTests(SimpleTestCase):
         self.client.upload_file.assert_not_called()
 
     def test_refuses_public_bucket(self):
-        self.client.get_bucket_acl.return_value = {"Grants": [{"Grantee": {"URI": "public"}}]}
+        self.anonymous.get_object.side_effect = None
         with self.assertRaises(CommandError):
             Command().handle()
         self.client.upload_file.assert_not_called()
 
-    def test_refuses_bucket_policy(self):
-        self.client.get_bucket_policy.side_effect = None
+    def test_refuses_ambiguous_privacy_response(self):
+        self.anonymous.get_object.side_effect = ClientError({"ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject")
         with self.assertRaises(CommandError):
+            Command().handle()
+        self.client.upload_file.assert_not_called()
+
+    def test_does_not_fall_back_to_media_credentials(self):
+        with patch.dict("os.environ", {"BACKUP_SPACES_SECRET_KEY": ""}), self.assertRaises(CommandError):
             Command().handle()
 
     @patch("chat.management.commands.backup_database.subprocess.run")

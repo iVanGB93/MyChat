@@ -11,6 +11,9 @@ import uuid
 from pathlib import Path
 
 import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+from botocore.exceptions import ClientError
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
@@ -28,24 +31,27 @@ class Command(BaseCommand):
         db = settings.DATABASES["default"]
         if db["ENGINE"] != "django.db.backends.postgresql":
             raise CommandError("This backup command requires PostgreSQL.")
+        access_key = os.getenv("BACKUP_SPACES_ACCESS_KEY", "").strip()
+        secret_key = os.getenv("BACKUP_SPACES_SECRET_KEY", "").strip()
+        if not access_key or not secret_key:
+            raise CommandError("Configure dedicated BACKUP_SPACES_ACCESS_KEY and BACKUP_SPACES_SECRET_KEY.")
         client = boto3.client(
             "s3", endpoint_url=settings.SPACES_ENDPOINT, region_name=settings.SPACES_REGION,
-            aws_access_key_id=settings.SPACES_ACCESS_KEY,
-            aws_secret_access_key=settings.SPACES_SECRET_KEY,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
         )
-        # Refuse a public bucket even though each archive also gets a private ACL.
-        acl = client.get_bucket_acl(Bucket=bucket)
-        if any(g.get("Grantee", {}).get("URI") for g in acl.get("Grants", [])):
-            raise CommandError("Backup bucket must not grant public/group access.")
-        # Bucket policies can override a private ACL; fail closed if one exists.
-        from botocore.exceptions import ClientError
-        try:
-            client.get_bucket_policy(Bucket=bucket)
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") != "NoSuchBucketPolicy":
-                raise CommandError("Unable to verify backup bucket policy.") from None
-        else:
-            raise CommandError("Use a backup bucket without a bucket policy.")
+        # DigitalOcean's limited keys cannot inspect bucket policies and cannot
+        # coexist with bucket policies. Probe actual anonymous access instead of
+        # expanding this key's permissions. Only a harmless sentinel is uploaded
+        # until the private-access check succeeds.
+        anonymous = boto3.client("s3", endpoint_url=settings.SPACES_ENDPOINT,
+                                 region_name=settings.SPACES_REGION,
+                                 config=Config(signature_version=UNSIGNED, connect_timeout=5,
+                                               read_timeout=5, retries={"max_attempts": 1}))
+        probe = f"postgres/privacy-check-{uuid.uuid4().hex}.txt"
+        client.put_object(Bucket=bucket, Key=probe, Body=b"Axonic backup privacy check", ACL="private")
+        client.head_object(Bucket=bucket, Key=probe)
+        self.require_private(anonymous, bucket, probe)
         env = dict(os.environ)
         env.update(PGHOST=str(db.get("HOST") or "localhost"), PGPORT=str(db.get("PORT") or 5432),
                    PGUSER=str(db["USER"]), PGPASSWORD=str(db["PASSWORD"]), PGDATABASE=str(db["NAME"]),
@@ -67,4 +73,16 @@ class Command(BaseCommand):
             head = client.head_object(Bucket=bucket, Key=key)
             if head["ContentLength"] != archive.stat().st_size or head.get("Metadata", {}).get("sha256") != digest:
                 raise CommandError("Uploaded backup verification failed.")
+            self.require_private(anonymous, bucket, key)
         self.stdout.write(self.style.SUCCESS(f"Backup archive uploaded and verified: {key}"))
+
+    @staticmethod
+    def require_private(anonymous, bucket, key):
+        try:
+            response = anonymous.get_object(Bucket=bucket, Key=key, Range="bytes=0-0")
+        except ClientError as exc:
+            if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 403:
+                return
+            raise CommandError("Cannot verify anonymous access is denied; backup stopped.") from None
+        response["Body"].close()
+        raise CommandError("Anonymous object access succeeded; backup bucket is not private.")

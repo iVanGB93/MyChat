@@ -34,11 +34,16 @@ iOS store discovery remains future work when the iOS app is published.
 
 Create a dedicated **private** Spaces bucket, without CDN or public bucket
 policy. Never use the media bucket. Set `BACKUP_SPACES_BUCKET` in the backup
-runtime and authorize the existing Spaces identity for that bucket, or use
-dedicated credentials. Database archives contain sensitive account data.
+runtime, and use bucket-limited `BACKUP_SPACES_ACCESS_KEY` and
+`BACKUP_SPACES_SECRET_KEY`. Do not replace the media credentials. Database
+archives contain sensitive account data. The command probes anonymous access
+using a harmless private sentinel before uploading any archive. Sentinel files
+are deliberately retained; no automated deletion is enabled.
 
-Install PostgreSQL 17+ client tools in a trusted runtime with the production
-database connection and Spaces settings. Run:
+Set Worker `NIXPACKS_CONFIG_FILE=deploy/nixpacks-worker.toml` to include PostgreSQL
+17 tools in the worker build. Deploy the updated code before the first backup.
+The Worker needs the production database connection and Spaces endpoint/region.
+Run in the Worker console (use `/opt/venv/bin/python` if necessary):
 
     python manage.py backup_database
 
@@ -52,6 +57,10 @@ SHA-256 against metadata, restore with `pg_restore --exit-on-error --no-owner
 --no-acl` into a NEW isolated PostgreSQL database, and compare migration and
 table counts. Never run a restore command against the production database.
 Record restore evidence and configure alerts for missed/failed backups.
+After the drill succeeds, set `DATABASE_BACKUPS_ENABLED=true` on both Worker
+and the single Beat service and deploy them. This schedules 08:00 UTC daily;
+the task expires if not picked up within an hour, logs sanitized failures,
+and never automatically deletes archives. Keep this flag off until validated.
 Choose retention/cost limits before enabling automatic remote deletion.
 
 The backup command is prepared, not a claim that scheduled backups or a

@@ -284,6 +284,8 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
+CELERY_IMPORTS = ("chat.backup_tasks",)
+DATABASE_BACKUPS_ENABLED = os.getenv("DATABASE_BACKUPS_ENABLED", "false").lower() == "true"
 MESSAGE_ACK_TIMEOUT_SECONDS = int(os.getenv("MESSAGE_ACK_TIMEOUT_SECONDS", "8"))
 PRESENCE_STALE_SECONDS = int(os.getenv("PRESENCE_STALE_SECONDS", "70"))
 MESSAGE_DELIVERY_SWEEP_INTERVAL_SECONDS = int(
@@ -349,6 +351,13 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": MESSAGE_DELIVERY_CLEANUP_INTERVAL_SECONDS,
     },
 }
+if DATABASE_BACKUPS_ENABLED:
+    from celery.schedules import crontab
+    CELERY_BEAT_SCHEDULE["daily-database-backup"] = {
+        "task": "chat.backup_tasks.backup_database",
+        "schedule": crontab(hour=8, minute=0),
+        "options": {"expires": 3600},
+    }
 
 # Reliability monitor thresholds (ops-tunable via environment)
 MONITOR_MSG_ACK_RATE_HEALTHY = float(os.getenv("MONITOR_MSG_ACK_RATE_HEALTHY", "0.99"))
