@@ -63,6 +63,30 @@ the task expires if not picked up within an hour, logs sanitized failures,
 and never automatically deletes archives. Keep this flag off until validated.
 Choose retention/cost limits before enabling automatic remote deletion.
 
-The backup command is prepared, not a claim that scheduled backups or a
-restore drill are already running. No Railway plan upgrade is required for
-an independently scheduled logical backup.
+### Restore evidence — 2026-09-13
+
+The production Worker created a private archive in `axonic-private-backups`:
+`postgres/2026/09/13/062137-01acc5f0ed2a4ac89ea82f887877b3ce.dump`.
+Downloaded size: 15,059,731 bytes. The downloaded SHA-256 matched the stored
+metadata. Anonymous access to the uploaded archive was denied.
+
+The downloaded archive restored successfully with `--exit-on-error` into a
+temporary PostgreSQL cluster inside the Worker, using a private Unix socket
+and no TCP listener. All 30 public tables were readable (2,035 rows total),
+including 17 users, 50 chat rooms, and 41 media records. All 56 migration
+records matched production. These are snapshot counts, not ongoing totals.
+The test PostgreSQL process was stopped; production was not restored over.
+
+Worker and Beat were deployed with `DATABASE_BACKUPS_ENABLED=true`. The live
+Beat settings showed the 08:00 UTC schedule and the live Worker registered
+the task. A queue-dispatched test (`3d76f150-436c-42bf-b599-eb2d92074bed`)
+succeeded in 2.26 seconds, creating a second verified archive at
+`postgres/2026/09/13/063151-2840e6d6b9be4da9b1e07c1e84b026f2.dump`.
+This verifies queue execution; the first clock-triggered daily run has not
+yet occurred as of this setup check.
+
+Daily scheduling requires the enabled flag on both deployed Worker and Beat;
+verify live settings and task execution after changing it. Failure logging is
+implemented, but an independent missed-backup alert and automatic retention
+are not configured. No Railway plan upgrade is required for these logical
+backups. Media object contents are not included in the database archive.
