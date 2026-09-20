@@ -446,7 +446,37 @@ class CallStatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        return Response({"status": call.status, "call_id": str(call.id)})
+        return Response({"status": call.status, "call_id": str(call.id),
+                         "video_quality": call.video_quality, "quality_revision": call.quality_revision})
+
+    def patch(self, request, call_id):
+        mode = request.data.get("video_quality")
+        if mode not in ("automatic", "low", "medium", "high"):
+            return Response({"error": "Invalid video quality"}, status=400)
+        with transaction.atomic():
+            call = CallLog.objects.select_for_update().filter(
+                Q(caller=request.user) | Q(callee=request.user), id=call_id,
+            ).first()
+            if call is None:
+                return Response({"error": "Call not found"}, status=404)
+            if call.call_type != CallLog.VIDEO or call.status not in (CallLog.INITIATED, CallLog.RINGING, CallLog.ONGOING):
+                return Response({"error": "Video call is not active"}, status=409)
+            changed = call.video_quality != mode
+            if changed:
+                call.video_quality = mode
+                call.quality_revision += 1
+                call.save(update_fields=["video_quality", "quality_revision"])
+            payload = {"event": "call_quality_changed", "call_id": str(call.id),
+                       "video_quality": call.video_quality, "quality_revision": call.quality_revision}
+        if changed:
+            # Persistence is authoritative; existing status polling recovers missed broadcasts.
+            try:
+                layer = get_channel_layer()
+                for user_id in (call.caller_id, call.callee_id):
+                    async_to_sync(layer.group_send)(f"notifications_{user_id}", {"type": "notify", "payload": payload})
+            except Exception:
+                logger.warning("Could not broadcast video quality for call %s", call.id)
+        return Response(payload)
 
 
 class CallHistoryView(generics.ListAPIView):

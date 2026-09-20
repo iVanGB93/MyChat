@@ -7,6 +7,32 @@ from .models import CallLog
 
 
 class CallSafetyTests(TestCase):
+    @patch('calls.views.get_channel_layer')
+    def test_video_quality_is_shared_versioned_and_participant_only(self, layer):
+        from unittest.mock import AsyncMock
+        layer.return_value.group_send = AsyncMock()
+        call = CallLog.objects.create(caller=self.caller, callee=self.callee,
+                                      call_type='video', status=CallLog.ONGOING)
+        url = f'/api/calls/{call.id}/status/'
+        self.client.force_authenticate(self.caller)
+        result = self.client.patch(url, {'video_quality': 'low'}, format='json')
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.data['quality_revision'], 1)
+        self.assertEqual(layer.return_value.group_send.call_count, 2)
+        self.client.patch(url, {'video_quality': 'low'}, format='json')
+        self.assertEqual(layer.return_value.group_send.call_count, 2)
+        self.client.force_authenticate(self.callee)
+        self.assertEqual(self.client.get(url).data['video_quality'], 'low')
+        self.assertEqual(self.client.patch(url, {'video_quality': 'high'}, format='json').data['quality_revision'], 2)
+        self.assertEqual(self.client.patch(url, {'video_quality': 'invalid'}, format='json').status_code, 400)
+        outsider = get_user_model().objects.create_user(username='quality-outsider')
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self.client.patch(url, {'video_quality': 'low'}, format='json').status_code, 404)
+        self.client.force_authenticate(self.caller)
+        call.status = CallLog.ENDED
+        call.save(update_fields=['status'])
+        self.assertEqual(self.client.patch(url, {'video_quality': 'medium'}, format='json').status_code, 409)
+
     def setUp(self):
         self.caller = get_user_model().objects.create_user(username="audit-caller")
         self.callee = get_user_model().objects.create_user(username="audit-callee")

@@ -42,6 +42,8 @@ class CallLog(models.Model):
     invite_acked_at = models.DateTimeField(blank=True, null=True)
     ended_at = models.DateTimeField(blank=True, null=True)
     duration_seconds = models.PositiveIntegerField(default=0)
+    video_quality = models.CharField(max_length=10, default="automatic")
+    quality_revision = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ["-started_at"]
