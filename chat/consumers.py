@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -23,6 +24,7 @@ from .relay_service import (
     pending_recovery_routes,
 )
 from .push import send_message_push
+from .p2p_signaling import parse_text_signal, authorize_text_signal
 from users.models import BlockedUser, Contact, UserDevice, UserPresence, UserPresenceSession
 from users.presence import (
     aggregate_user_presence,
@@ -1398,6 +1400,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
         self.user = self.scope["user"]
+        self._text_endpoint_id = str(uuid4())
+        self._text_signal_times = deque()
         self.installation_id = ""
         self._awaiting_auth = False
         self._accepted = False
@@ -2128,6 +2132,26 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     )
                 return
 
+            # Text prototype has its own namespace, independent of call signaling.
+            if msg_type == "p2p_text_signal":
+                now = time.monotonic()
+                while self._text_signal_times and self._text_signal_times[0] <= now - 60:
+                    self._text_signal_times.popleft()
+                if len(self._text_signal_times) >= 120:
+                    return
+                self._text_signal_times.append(now)
+                signal = parse_text_signal(data)
+                if signal is None or not await database_sync_to_async(authorize_text_signal)(self.user.id, signal):
+                    return
+                target_id = signal.pop("target_user_id")
+                await self.channel_layer.group_send(f"notifications_{target_id}", {
+                    "type": "p2p.text.signal",
+                    "payload": {**signal, "event": "p2p_text_signal",
+                                "from_user_id": self.user.id,
+                                "from_endpoint_id": self._text_endpoint_id},
+                })
+                return
+
             # ---- WebRTC signaling ----
             if msg_type == "webrtc_signal":
                 target_id = data.get("target_user_id")
@@ -2196,6 +2220,13 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             )
         except Exception:
             logger.exception("[Presence] broadcast failed user=%s", self.user.id)
+
+    async def p2p_text_signal(self, event):
+        payload = event["payload"]
+        target = payload.get("target_endpoint_id")
+        if target and target != self._text_endpoint_id:
+            return
+        await self.send(text_data=json.dumps(payload))
 
     async def _subscribe_presence_groups(self, requested_ids: set[int] | None = None) -> None:
         allowed_ids = await self._allowed_presence_target_ids(requested_ids)
