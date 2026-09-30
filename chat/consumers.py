@@ -25,6 +25,7 @@ from .relay_service import (
 )
 from .push import send_message_push
 from .p2p_signaling import parse_text_signal, authorize_text_signal
+from .chat_identity_binding import parse_chat_binding
 from users.models import BlockedUser, Contact, UserDevice, UserPresence, UserPresenceSession
 from users.presence import (
     aggregate_user_presence,
@@ -2130,6 +2131,24 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                             },
                         },
                     )
+                return
+
+            # Migration proofs carry public identity metadata, never chat content.
+            if msg_type == "chat_identity_binding":
+                now = time.monotonic()
+                while self._text_signal_times and self._text_signal_times[0] <= now - 60:
+                    self._text_signal_times.popleft()
+                if len(self._text_signal_times) >= 120:
+                    return
+                self._text_signal_times.append(now)
+                binding = parse_chat_binding(data, self.user.id)
+                if binding is None or not await database_sync_to_async(authorize_text_signal)(self.user.id, binding):
+                    return
+                target_id = binding.pop("target_user_id")
+                await self.channel_layer.group_send(f"notifications_{target_id}", {
+                    "type": "notify",
+                    "payload": {**binding, "event": "chat_identity_binding", "from_user_id": self.user.id},
+                })
                 return
 
             # Text prototype has its own namespace, independent of call signaling.
