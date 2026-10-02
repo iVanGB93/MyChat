@@ -105,3 +105,34 @@ class ActionableFcmNotificationTests(TestCase):
         self.assertNotIn("body", kwargs)
         self.assertEqual(kwargs["data"]["type"], "message_recovery_hint")
         self.assertEqual(kwargs["data"]["message_id"], "message-1")
+
+    @patch("chat.neuron_push.send_neuron_call_push", return_value=True)
+    @patch("chat.push._send_fcm_data")
+    def test_delegated_call_does_not_also_send_through_django(self, local, remote):
+        self.assertTrue(send_call_push(self.recipient.id, self.sender.username,
+                                     "voice", "call-1", self.sender.id, "call-room"))
+        local.assert_not_called()
+        self.assertEqual(remote.call_args.args[0], ["raw-fcm-token"])
+        self.assertEqual(remote.call_args.args[1]["type"], "incoming_call")
+
+    @patch("chat.neuron_push.send_neuron_call_push", return_value=False)
+    @patch("chat.push._send_fcm_data")
+    def test_failed_delegation_does_not_fall_back_and_duplicate(self, local, remote):
+        self.assertFalse(send_call_push(self.recipient.id, self.sender.username,
+                                      "voice", "call-1", self.sender.id, "call-room"))
+        local.assert_not_called()
+
+    @patch("chat.neuron_push.send_neuron_message_push", return_value=True)
+    @patch("chat.push._send_fcm_data")
+    def test_message_delegation_keeps_payload_without_a_second_sender(self, local, remote):
+        self.assertTrue(send_message_push([self.recipient.id], self.sender.username, "Hello",
+                        "room-1", "Test", message_id="msg-1", sender_id=self.sender.id))
+        local.assert_not_called()
+        self.assertEqual(remote.call_args.args[1]["content"], "Hello")
+
+    @patch("chat.neuron_push.send_neuron_message_push", return_value=None)
+    @patch("chat.push._send_fcm_data", return_value=True)
+    def test_unsupported_message_preserves_legacy_delivery(self, local, remote):
+        self.assertTrue(send_message_push([self.recipient.id], self.sender.username, "Hello",
+                        "room-1", "Test", sender_id=self.sender.id))
+        local.assert_called_once()

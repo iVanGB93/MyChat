@@ -451,6 +451,11 @@ LIVEKIT_URL = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
 # (Railway / production, where there's no reliable filesystem to drop a file).
 # ---------------------------------------------------------------------------
 
+NEURON_CALL_PUSH_URL = os.getenv("NEURON_CALL_PUSH_URL", "").strip()
+NEURON_MESSAGE_PUSH_URL = os.getenv("NEURON_MESSAGE_PUSH_URL", "").strip()
+NEURON_PUSH_BRIDGE_SECRET = os.getenv("NEURON_PUSH_BRIDGE_SECRET", "").strip()
+NEURON_PUSH_CA_BUNDLE = os.getenv("NEURON_PUSH_CA_BUNDLE", "").strip()
+
 FCM_SERVICE_ACCOUNT_INFO = None
 _fcm_raw = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip()
 if _fcm_raw:

@@ -519,11 +519,15 @@ def send_message_push(
         # canonical message fields continue to drive local persistence.
         fcm_data["title"] = sender_name
         fcm_data["body"] = display_body
-        sent = _send_fcm_data(
-            fcm_tokens=fcm_tokens,
-            data=fcm_data,
-            channel_id="messages",
-        ) or sent
+        from .neuron_push import send_neuron_message_push
+        delegated = send_neuron_message_push(fcm_tokens, fcm_data)
+        if delegated is None:
+            delegated = _send_fcm_data(
+                fcm_tokens=fcm_tokens,
+                data=fcm_data,
+                channel_id="messages",
+            )
+        sent = delegated or sent
     if tokens:
         sent = _send_expo_push(
             push_tokens=tokens,
@@ -627,12 +631,16 @@ def send_call_push(
         fcm_data["body"] = body
         # Data-only is required here: attaching an FCM notification block makes
         # Android draw a generic alert and bypasses Axonic's CallStyle renderer.
-        sent = _send_fcm_data(
-            fcm_tokens=fcm_tokens,
-            data=fcm_data,
-            channel_id="incoming-calls-v2",
-            priority="high",
-        ) or sent
+        from .neuron_push import send_neuron_call_push
+        delegated = send_neuron_call_push(fcm_tokens, fcm_data)
+        if delegated is None:
+            delegated = _send_fcm_data(
+                fcm_tokens=fcm_tokens,
+                data=fcm_data,
+                channel_id="incoming-calls-v2",
+                priority="high",
+            )
+        sent = delegated or sent
     if tokens:
         sent = _send_expo_push(
             push_tokens=tokens,
