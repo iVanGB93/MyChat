@@ -1,5 +1,33 @@
 # FirstNeuron call-push transition
 
+## Verified migration binding prepared (October 2, 2026)
+
+`POST /api/users/neuron-binding/` now requires a Django login and an active installation owned by that user. It issues a 60-second, domain-separated HMAC ticket for the requested cryptographic account and the hash of that installation's current FCM token. The ticket contains no token or password and is marked no-store. The mobile foreground registration worker obtains this ticket automatically and submits it on its authenticated axon. Older backends remain compatible: direct registration continues and binding is retried.
+
+FirstNeuron verifies the ticket against the authenticated account and submitted registration token. It durably pins the legacy user/installation to that account/device, rejects conflicting ownership claims, and does not publish these private migration anchors to the identity directory. Reinstallation with a different identity or switching accounts on the same installation requires a future explicit migration/recovery policy; there is deliberately no silent overwrite. This is transitional Django-account linkage, not an authority over cryptographic identities.
+
+Both gateway routes accept authenticated version-2 jobs containing a legacy user/installation target. FirstNeuron selects that target's current directly registered token. Unbound installations use the supplied legacy fallback token; bound but revoked, unauthorized or expired registrations fail closed. Duplicate receipts remain durable across restart and contain neither tokens nor payload content. Django still supplies the fallback token and selects active installations/preferences; this does not yet remove its device table or notification responsibilities.
+
+FirstNeuron support is deployed, health passed, identity unchanged, rollback `/opt/axonic-neuron-before-binding-20261002`. Both emulator registrations remain present. Unsigned public call/message requests return 403. Validation: 650 mobile tests, 60 hosted tests, TypeScript, service-cycle checks, shared-core parity, and isolated backend migration/push tests. No new production build, account replacement or application reinstall was performed.
+
+Next deployment: deploy the backend through the normal Railway workflow; no schema migration or new secret is required. Leave `NEURON_REGISTERED_PUSH_ENABLED` absent/false initially. Once the ticket endpoint is live, verify both emulators bind automatically. The optional flag enables version-2 target routing; do not enable it broadly until live background delivery and long-inactivity handling are verified. Current direct registrations expire after 24 hours without foreground renewal, and bound expired registrations intentionally cannot fall back around that lease. Address that wake/renewal policy before production cutover. The opt-in local-account receiver/unlock design remains separate.
+
+## Direct device registration added
+
+The development mobile runtime now registers its FCM token directly with FirstNeuron over the authenticated axon, using negotiated push-registration-v1 support. The gateway derives account and device from the authenticated peer; the request cannot supply another owner. Only a device authorized by the latest locally pinned signed record can register. Tokens stay in private gateway storage and are never included in the public identity directory.
+
+Registration replaces that device's previous token, refuses a token already bound to a different device/account, refreshes hourly and after token rotation, and expires after 24 hours without renewal. Backgrounding preserves the registration. Logout requests revocation before teardown and attempts Firebase token deletion, with bounded waits; offline revocation is best effort and lease expiry is the fallback. Old clients remain compatible. The opt-in local-account recovery prototype is not wired to this legacy-notification registration yet, because its locked-account receiver still needs a dedicated design.
+
+FirstNeuron was deployed with unchanged identity and rollback /opt/axonic-neuron-before-registration-20261002. Both development emulators automatically registered their distinct cryptographic identities; no tokens were exposed in evidence. 648 mobile tests and 56 hosted tests passed, along with TypeScript and the dependency check. Token rotation, cancellation, revocation, device authorization and expiry were tested using disposable fixtures. Existing emulator accounts were not logged out or replaced.
+
+This is parallel registration, not destination cutover: production notifications still obtain addresses through the working Django bridge. Django relays chat identity proofs but has no durable authoritative mapping from numeric users to these cryptographic accounts. A verified migration binding is required before the old call/message requests can select the new registry safely. Do not remove Django push registration or credentials yet. Production phones need these mobile changes in a subsequent app build; no native rebuild is required for development hot reload.
+
+## Activation verified
+
+After the user deployed the backend and configured Railway on October 2, 2026, live tests confirmed both bridges. A call invitation from emulator user 18 to emulator user 14 produced one FirstNeuron FCM-accepted call receipt and an Android incoming-call notification while the receiver was backgrounded. The test call was ended afterward.
+
+A labeled test message through the production REST message-send path produced one FirstNeuron FCM-accepted message receipt. The background receiver displayed the exact test content with Reply and Mark as read actions, and the message was found in its local database. The receiver was returned to its existing app afterward. This verifies background delivery, not force-stopped or terminated-app behavior. It does not prove Django-independent call coordination or peer-only push triggering. Local test evidence: Axonic-app/builds/production-push-bridge-test.json (ignored).
+
 ## Completed October 2, 2026
 
 FirstNeuron now hosts a dedicated, optional FCM call-push gateway. It is a transitional hosted capability, not an identity authority. Ordinary phones never receive the Firebase service credential or bridge secret.

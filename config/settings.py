@@ -455,6 +455,7 @@ NEURON_CALL_PUSH_URL = os.getenv("NEURON_CALL_PUSH_URL", "").strip()
 NEURON_MESSAGE_PUSH_URL = os.getenv("NEURON_MESSAGE_PUSH_URL", "").strip()
 NEURON_PUSH_BRIDGE_SECRET = os.getenv("NEURON_PUSH_BRIDGE_SECRET", "").strip()
 NEURON_PUSH_CA_BUNDLE = os.getenv("NEURON_PUSH_CA_BUNDLE", "").strip()
+NEURON_REGISTERED_PUSH_ENABLED = os.getenv("NEURON_REGISTERED_PUSH_ENABLED", "false").lower() == "true"
 
 FCM_SERVICE_ACCOUNT_INFO = None
 _fcm_raw = os.getenv("FCM_SERVICE_ACCOUNT_JSON", "").strip()

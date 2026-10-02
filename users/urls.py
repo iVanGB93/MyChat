@@ -4,6 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import views
 from .auth import AxonicTokenObtainPairView
+from .neuron_binding import NeuronBindingView
 from .easy_auth import EmailSignInStart, EmailSignInVerify, GoogleSignIn
 
 router = DefaultRouter()
@@ -34,6 +35,7 @@ urlpatterns = [
     path("search/", views.UserSearchView.as_view(), name="user-search"),
     # Push notifications
     path("push-token/", views.RegisterPushTokenView.as_view(), name="push-token"),
+    path("neuron-binding/", NeuronBindingView.as_view(), name="neuron-binding"),
     path("push-token/unregister/", views.UnregisterPushTokenView.as_view(), name="push-token-unregister"),
     # Pending notifications (background fetch)
     path("notifications/pending/", views.PendingNotificationsView.as_view(), name="pending-notifications"),

@@ -51,11 +51,17 @@ def _send_neuron_push(tokens, data, *, message):
     handled = False
     # One id per call/token: an HTTP retry cannot produce a second push.
     expires = int(time.time() * 1000) + 45000
+    targets = {}
+    if getattr(settings, "NEURON_REGISTERED_PUSH_ENABLED", False):
+        from users.models import UserDevice
+        for device in UserDevice.objects.filter(is_active=True, fcm_token__in=tokens):
+            targets[device.fcm_token] = {"user": device.user_id, "installation": device.installation_id}
     for token in dict.fromkeys(tokens):
         if not token or int(time.time() * 1000) >= expires:
             continue
         raw = json.dumps({
-            "version": 1,
+            "version": 2 if token in targets else 1,
+            **({"target": targets[token]} if token in targets else {}),
             "id": hashlib.sha256((event_id + "\0" + token).encode()).hexdigest(),
             "expiresAt": expires, "token": token, "data": values,
         }, separators=(",", ":"), ensure_ascii=False).encode()
