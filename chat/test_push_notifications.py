@@ -106,6 +106,20 @@ class ActionableFcmNotificationTests(TestCase):
         self.assertEqual(kwargs["data"]["type"], "message_recovery_hint")
         self.assertEqual(kwargs["data"]["message_id"], "message-1")
 
+    @patch("chat.neuron_push.send_neuron_message_push", return_value=True)
+    @patch("chat.push._send_fcm_data")
+    def test_recovery_delegates_without_second_sender(self, local, remote):
+        self.assertTrue(send_message_recovery_hint([self.recipient.id], "room-1", "message-1", self.sender.id))
+        local.assert_not_called()
+        self.assertEqual(remote.call_args.args[1]["type"], "message_recovery_hint")
+        self.assertNotIn("content", remote.call_args.args[1])
+
+    @patch("chat.neuron_push.send_neuron_message_push", return_value=False)
+    @patch("chat.push._send_fcm_data")
+    def test_recovery_failure_never_duplicates_through_local_sender(self, local, remote):
+        self.assertFalse(send_message_recovery_hint([self.recipient.id], "room-1", "message-1", self.sender.id))
+        local.assert_not_called()
+
     @patch("chat.neuron_push.send_neuron_call_push", return_value=True)
     @patch("chat.push._send_fcm_data")
     def test_delegated_call_does_not_also_send_through_django(self, local, remote):

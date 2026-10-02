@@ -560,9 +560,7 @@ def send_message_recovery_hint(
     fcm_tokens = list(dict.fromkeys(token for token in rows if token))
     if not fcm_tokens:
         return False
-    return _send_fcm_data(
-        fcm_tokens=fcm_tokens,
-        data={
+    data = {
             "type": "message_recovery_hint",
             "roomId": room_id,
             "room_id": room_id,
@@ -570,7 +568,14 @@ def send_message_recovery_hint(
             "message_id": message_id,
             "senderId": str(sender_id),
             "sender_id": str(sender_id),
-        },
+        }
+    from .neuron_push import send_neuron_message_push
+    delegated = send_neuron_message_push(fcm_tokens, data)
+    if delegated is not None:
+        return delegated
+    return _send_fcm_data(
+        fcm_tokens=fcm_tokens,
+        data=data,
         channel_id="messages",
     )
 

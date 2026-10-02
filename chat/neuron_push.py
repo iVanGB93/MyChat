@@ -45,7 +45,8 @@ def _send_neuron_push(tokens, data, *, message):
         # No remote request has been made: safely preserve legacy delivery for
         # old payload shapes or payloads that do not fit the gateway contract.
         return None
-    event_id = ("message:" + str(values.get("messageId", ""))) if message else values.get("callId", "")
+    prefix = "recovery:" if values.get("type") == "message_recovery_hint" else "message:"
+    event_id = (prefix + str(values.get("messageId", ""))) if message else values.get("callId", "")
     if not event_id or (message and not values.get("messageId")):
         return False
     handled = False
@@ -89,10 +90,13 @@ def _send_neuron_push(tokens, data, *, message):
 
 
 def _bridge_message_supported(data):
+    recovery = data.get("type") == "message_recovery_hint"
+    if recovery and set(data) - {"type", "roomId", "room_id", "messageId", "message_id", "senderId", "sender_id", "channelId"}:
+        return False
     forbidden = {"audio_b64", "image_b64", "video_b64", "file_b64", "audio", "image",
                  "video", "file", "thumbnail_b64", "waveform"}
     return (
-        data.get("type") == "new_message"
+        data.get("type") in ("new_message", "message_recovery_hint")
         and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", data.get(k, "")) for k in ("messageId", "roomId"))
         and bool(re.fullmatch(r"[1-9][0-9]{0,14}", data.get("senderId", "")))
         and all(not data.get(alias) or data[alias] == data[key] for alias, key in (

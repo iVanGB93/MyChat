@@ -78,3 +78,15 @@ class NeuronMessagePushTests(SimpleTestCase):
     def test_ambiguous_message_send_is_not_fallback(self, post):
         self.assertIs(send_neuron_message_push(["fixture-token"], self.data), True)
         self.assertEqual(post.call_count, 1)
+
+    @patch("chat.neuron_push.requests.post")
+    def test_recovery_has_distinct_id_and_no_alert_content(self, post):
+        post.return_value = Mock(status_code=200, json=lambda: {"outcome": "sent"})
+        data = {"type": "message_recovery_hint", "messageId": "msg-1", "roomId": "room-1", "senderId": 18}
+        self.assertTrue(send_neuron_message_push(["fixture-token"], data))
+        packet = json.loads(post.call_args.kwargs["data"])
+        self.assertEqual(packet["id"], hashlib.sha256(b"recovery:msg-1\0fixture-token").hexdigest())
+        self.assertNotIn("body", packet["data"])
+        for field in ("body", "title", "content"):
+            self.assertIsNone(send_neuron_message_push(["fixture-token"], {**data, field: "unexpected"}))
+        self.assertEqual(post.call_count, 1)
