@@ -9,7 +9,9 @@
 - The single authenticated realtime connection is called **Axion** and uses `wss://chat.qbared.com/ws/notifications/`.
 - The backend is deployed on Railway. The user normally deploys backend changes and will say when deployment is complete.
 - Do not commit, push, deploy, reinstall apps, wipe emulator data, or run a production build unless the user explicitly asks.
+- Standing authorization (October 5, 2026): rebuild local development clients and reinstall them on the two test emulators when needed, preserving their identities and data. Do not ask again for these emulator updates; phone installations, production builds, and data wipes still require explicit authorization.
 - Never store account passwords, access tokens, Railway credentials, or other secrets in repository instructions or scripts.
+- For requested APK builds, compile locally on the user's PC with the Android/Gradle toolchain. Do not use Expo EAS cloud builds unless the user explicitly changes this preference. This concerns APK build execution, not removing Expo from the app or changing the AAB release workflow. Preserve release feature flags and signing compatibility; report any local-build blocker rather than silently switching to the cloud.
 
 ## Saved command: "start the environment"
 

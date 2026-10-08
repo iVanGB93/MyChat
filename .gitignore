@@ -6,6 +6,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# Local APKs, device diagnostics, and deployment staging artifacts
+/builds/
 eggs/
 *.egg
 
