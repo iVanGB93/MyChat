@@ -9,7 +9,9 @@
 - The single authenticated realtime connection is called **Axion** and uses `wss://chat.qbared.com/ws/notifications/`.
 - The backend is deployed on Railway. The user normally deploys backend changes and will say when deployment is complete.
 - Do not commit, push, deploy, reinstall apps, wipe emulator data, or run a production build unless the user explicitly asks.
+- Production-build confirmation (October 10, 2026): ask the user before starting each production build, including EAS cloud AAB builds and local release APK builds, and wait for explicit confirmation for that build. General approval to continue development or finish release checks is not production-build approval.
 - Standing authorization (October 5, 2026): rebuild local development clients and reinstall them on the two test emulators when needed, preserving their identities and data. Do not ask again for these emulator updates; phone installations, production builds, and data wipes still require explicit authorization.
+- Standing authorization (October 10, 2026): locally rebuild and update the separate Axonic Dev app (`com.axonic.dev`) on the user's test phone as needed, preserving its data. The user authorized a separate test identity there. Do not ask again for these Dev updates. This does not authorize replacing the official `com.axonic` app, production builds, or data wipes.
 - Never store account passwords, access tokens, Railway credentials, or other secrets in repository instructions or scripts.
 - For requested APK builds, compile locally on the user's PC with the Android/Gradle toolchain. Do not use Expo EAS cloud builds unless the user explicitly changes this preference. This concerns APK build execution, not removing Expo from the app or changing the AAB release workflow. Preserve release feature flags and signing compatibility; report any local-build blocker rather than silently switching to the cloud.
 
