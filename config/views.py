@@ -5,12 +5,14 @@ These serve HTML pages that interact with the REST API via JavaScript.
 
 from datetime import timedelta
 from urllib.parse import quote
+import hashlib
+import re
 
 from django.contrib.auth import get_user_model
 from django.contrib.admin.views.decorators import staff_member_required
 from django.conf import settings
 from django.db.models import Avg, DurationField, ExpressionWrapper, F, Q
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponseBadRequest
 from django.shortcuts import render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
@@ -30,6 +32,28 @@ def landing_view(request):
             "ios_store_url": settings.APP_STORE_URL_IOS,
         },
     )
+
+
+def identity_invite_view(request, identity_code: str):
+    """Clickable public identity link; never looks up or accepts an account."""
+    if not re.fullmatch(r"axon:[1-9A-HJ-NP-Za-km-z]{36,50}", identity_code):
+        return HttpResponseBadRequest("Invalid Axonic identity code")
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    encoded = identity_code[5:]
+    number = 0
+    for char in encoded:
+        number = number * 58 + alphabet.index(char)
+    zeros = len(encoded) - len(encoded.lstrip("1"))
+    decoded = b"\0" * zeros + number.to_bytes((number.bit_length() + 7) // 8, "big")
+    if len(decoded) != 36 or decoded[32:] != hashlib.sha256(hashlib.sha256(decoded[:32]).digest()).digest()[:4]:
+        return HttpResponseBadRequest("Invalid Axonic identity code")
+    response = render(request, "identity_invite.html", {
+        "identity_code": identity_code,
+        "deep_link": "axonic://identity/" + quote(identity_code, safe=""),
+        "android_store_url": settings.APP_STORE_URL_ANDROID,
+    })
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @never_cache

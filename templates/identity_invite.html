@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="Open this identity in Axonic to start a chat.">
+  <title>Chat on Axonic</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:#010812; color:#e9eefb; font-family:system-ui,sans-serif; }
+    main { width:100%; max-width:460px; padding:28px; border:1px solid #235665; border-radius:20px; background:#0b1729; }
+    h1 { color:#00d5ed; margin:0 0 16px; }
+    p { line-height:1.5; color:#b6c6d9; }
+    code { display:block; overflow-wrap:anywhere; padding:16px; border:1px solid #235665; border-radius:12px; line-height:1.5; user-select:all; }
+    .open { display:block; text-align:center; margin:24px 0 16px; padding:16px; background:#00d5ed; border-radius:12px; color:#010812; font-weight:700; text-decoration:none; }
+    .download { color:#00d5ed; }
+  </style>
+</head>
+<body><main>
+  <h1>Chat on Axonic</h1>
+  <p>Open this identity in Axonic, then choose Start Chat.</p>
+  <code>{{ identity_code }}</code>
+  <a class="open" href="{{ deep_link }}">Open Axonic</a>
+  <p>You can also copy the full ID above and paste it into New Chat.</p>
+  <a class="download" href="{{ android_store_url }}">Get Axonic on Google Play</a>
+</main></body>
+</html>
